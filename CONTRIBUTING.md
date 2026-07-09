@@ -173,7 +173,7 @@ After code changes are pushed, run the release script once on each platform. The
 | Flag | Description |
 |------|-------------|
 | `--draft` / `-Draft` | Create the release as a draft (default: published) |
-| `--minor` / `-Minor` | Bump the minor version instead of patch (default: patch) |
+| `--minor` / `-Minor` | Bump the month component instead of patch (default: patch) |
 | `--force` / `-Force` | Skip version mismatch check (use when pushing ahead of remote) |
 
 ### Prerequisites
