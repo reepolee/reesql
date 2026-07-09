@@ -6,8 +6,11 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 #[derive(Parser)]
-#[command(name = "reesql", version, about = "MySQL SQL formatter")]
+#[command(name = "reesql", disable_version_flag = true, about = "MySQL SQL formatter")]
 struct Cli {
+    #[arg(long = "version", action = clap::ArgAction::SetTrue, help = "Print the bare version number")]
+    version: bool,
+
     #[arg(long = "where", action = clap::ArgAction::SetTrue)]
     where_: bool,
     file: Option<String>,
@@ -1473,6 +1476,11 @@ fn format_sql(input: &str) -> String {
 
 fn main() {
     let cli = Cli::parse();
+
+    if cli.version {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
 
     if cli.where_ {
         println!("{}", executable_dir().display());
