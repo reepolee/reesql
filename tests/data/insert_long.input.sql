@@ -1,0 +1,1 @@
+insert into users (id, name, email, status, role, department) values (1, 'Alexander Hamilton', 'alex@example.com', 'active', 'admin', 'engineering'), (2, 'Benjamin Franklin', 'ben@example.com', 'active', 'user', 'marketing');

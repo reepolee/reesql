@@ -1,0 +1,9 @@
+/target/
+
+# macOS folder metadata
+.DS_Store
+
+# Release binaries left in the project root by release.sh
+sqlfmt-linux-*
+sqlfmt-macos-*
+sqlfmt-windows-*.exe
