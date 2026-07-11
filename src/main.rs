@@ -5,10 +5,15 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
+fn display_version() -> String {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    format!("{}.{:02}.{}", parts.next().unwrap_or("0"), parts.next().unwrap_or("0").parse::<u32>().unwrap_or(0), parts.next().unwrap_or("0"))
+}
+
 #[derive(Parser)]
 #[command(name = "reesql", disable_version_flag = true, about = "MySQL SQL formatter")]
 struct Cli {
-    #[arg(long = "version", action = clap::ArgAction::SetTrue, help = "Print the bare version number")]
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::SetTrue, help = "Print the bare version number")]
     version: bool,
 
     #[arg(long = "where", action = clap::ArgAction::SetTrue)]
@@ -1478,7 +1483,7 @@ fn main() {
     let cli = Cli::parse();
 
     if cli.version {
-        println!("26.07.1");
+        println!("{}", display_version());
         return;
     }
 
