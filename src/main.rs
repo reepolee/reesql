@@ -1478,7 +1478,7 @@ fn main() {
     let cli = Cli::parse();
 
     if cli.version {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+        println!("26.07.1");
         return;
     }
 
