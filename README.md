@@ -8,17 +8,17 @@ A MySQL SQL formatter written in Rust. Reads SQL from stdin or a file, and write
 
 ## Features
 
-- **Keyword uppercasing** — SQL keywords (`SELECT`, `FROM`, `WHERE`, `CREATE`, `INSERT`, etc.) are uppercased
-- **CREATE TABLE formatting** — column names and types aligned, constraints on separate lines, types uppercased
-- **CREATE VIEW formatting** — select columns on separate lines with `AS` alignment, JOINs indented
-- **UPDATE formatting** — `SET` assignments on indented lines, `WHERE` on its own line
-- **DELETE formatting** — `WHERE` clause on its own line
-- **INSERT formatting** — multi-line value tuples when they exceed 100 characters
-- **Subquery formatting** — `(SELECT ...)` subqueries indented on separate lines
-- **Operator support** — comparison operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`) are preserved and spaced correctly
-- **Comment preservation** — `--`, `/* */`, and `#` comments are preserved and positioned correctly
-- **In-place file editing** — pass a file path to format it in place, or use stdin/stdout
-- **Cross-platform** — normalizes `\r\n` and `\n` line endings consistently
+- **Keyword uppercasing** - SQL keywords (`SELECT`, `FROM`, `WHERE`, `CREATE`, `INSERT`, etc.) are uppercased
+- **CREATE TABLE formatting** - column names and types aligned, constraints on separate lines, types uppercased
+- **CREATE VIEW formatting** - select columns on separate lines with `AS` alignment, JOINs indented
+- **UPDATE formatting** - `SET` assignments on indented lines, `WHERE` on its own line
+- **DELETE formatting** - `WHERE` clause on its own line
+- **INSERT formatting** - multi-line value tuples when they exceed 100 characters
+- **Subquery formatting** - `(SELECT ...)` subqueries indented on separate lines
+- **Operator support** - comparison operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`) are preserved and spaced correctly
+- **Comment preservation** - `--`, `/* */`, and `#` comments are preserved and positioned correctly
+- **In-place file editing** - pass a file path to format it in place, or use stdin/stdout
+- **Cross-platform** - normalizes `\r\n` and `\n` line endings consistently
 
 ## Installation
 
@@ -175,7 +175,7 @@ insert into users (id, name) values (1, 'Alice');
 INSERT INTO users (id, name) VALUES (1,'Alice');
 ```
 
-### INSERT (long — multi-line when > 100 chars)
+### INSERT (long - multi-line when > 100 chars)
 
 **Input:**
 ```sql
@@ -234,10 +234,10 @@ SELECT * FROM users WHERE age >= 18 AND age <= 65 AND name != 'admin' AND status
 
 ## How it works
 
-1. **Tokenization** — raw SQL is split into tokens: keywords, identifiers, operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`), comments, and strings
-2. **Statement splitting** — tokens are split at semicolons into individual statements
-3. **Type detection** — each statement is classified (CREATE TABLE, SELECT, INSERT, UPDATE, etc.)
-4. **Formatting** — each statement type has a dedicated formatter that produces well-structured output; subqueries are formatted recursively with indentation
+1. **Tokenization** - raw SQL is split into tokens: keywords, identifiers, operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`), comments, and strings
+2. **Statement splitting** - tokens are split at semicolons into individual statements
+3. **Type detection** - each statement is classified (CREATE TABLE, SELECT, INSERT, UPDATE, etc.)
+4. **Formatting** - each statement type has a dedicated formatter that produces well-structured output; subqueries are formatted recursively with indentation
 
 ## Testing
 
