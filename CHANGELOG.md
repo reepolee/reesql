@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 date-based (`YY.M.PATCH`) and cut by `release.sh`, which inserts a heading for each new
 version and uses the text under it as the GitHub Release notes.
 
+
+## [26.7.8] - 2026-07-22
+
 ## [26.7.7] - 2026-07-22
 
 ### Added
