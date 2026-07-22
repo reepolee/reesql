@@ -188,6 +188,53 @@ version_gt() {
 	[ "$a_patch" -gt "$b_patch" ]
 }
 
+# ──────────────────────────────────────────────
+# Changelog
+# ──────────────────────────────────────────────
+
+# Give the release being cut the notes written under "## [Unreleased]", and leave a fresh
+# Unreleased heading in its place. Without this the version heading is created empty and the
+# release always ships with placeholder notes, since the version is not known until the bump.
+update_changelog() {
+	[ -f CHANGELOG.md ] || return 0
+
+	local today first_version_line
+	today=$(date +%Y-%m-%d)
+
+	# Already written by hand for this version.
+	if grep -q "^## \[$version\]" CHANGELOG.md 2>/dev/null; then
+		return 0
+	fi
+
+	if grep -q "^## \[Unreleased\]" CHANGELOG.md 2>/dev/null; then
+		awk -v ver="$version" -v today="$today" '
+			!renamed && /^## \[Unreleased\]/ {
+				print "## [Unreleased]"
+				print ""
+				print "## [" ver "] - " today
+				renamed = 1
+				next
+			}
+			{ print }
+		' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+		echo "  CHANGELOG.md: released the Unreleased notes as $version"
+		return 0
+	fi
+
+	# No Unreleased section: fall back to opening an empty heading for this version.
+	first_version_line=$(grep -n "^## \[" CHANGELOG.md | head -1 | cut -d: -f1 || true)
+	if [ -n "$first_version_line" ]; then
+		{
+			head -n $((first_version_line - 1)) CHANGELOG.md
+			echo ""
+			echo "## [$version] - $today"
+			echo ""
+			tail -n +"$first_version_line" CHANGELOG.md
+		} > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+		echo "  CHANGELOG.md: added an empty heading for $version (no Unreleased section)"
+	fi
+}
+
 version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
 if [ -z "$version" ]; then
 	echo "ERROR: Could not find version in Cargo.toml" >&2
@@ -300,43 +347,13 @@ if [ "$new_commits" -gt 0 ] && [ "$force_skip_bump" = false ] && [ "$migration_m
 	tag="v$release_version"
 	do_bump=true
 
-	if [ -f CHANGELOG.md ]; then
-		today=$(date +%Y-%m-%d)
-		if ! grep -q "^## \\[$version\\]" CHANGELOG.md 2>/dev/null; then
-			first_version_line=$(grep -n "^## \\[" CHANGELOG.md | head -1 | cut -d: -f1 || true)
-			if [ -n "$first_version_line" ]; then
-				{
-					head -n $((first_version_line - 1)) CHANGELOG.md
-					echo ""
-					echo "## [$version] - $today"
-					echo ""
-					tail -n +"$first_version_line" CHANGELOG.md
-				} > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
-				echo "  Updated CHANGELOG.md with version $version"
-			fi
-		fi
-	fi
+	update_changelog
 elif [ "$force_skip_bump" = true ]; then
 	echo "═══ reesql release $version (all targets) ═══"
 	echo "  (Force: resuming release for $version, $new_commits commits since $latest_tag)"
 	do_bump=true
 
-	if [ -f CHANGELOG.md ]; then
-		today=$(date +%Y-%m-%d)
-		if ! grep -q "^## \\[$version\\]" CHANGELOG.md 2>/dev/null; then
-			first_version_line=$(grep -n "^## \\[" CHANGELOG.md | head -1 | cut -d: -f1 || true)
-			if [ -n "$first_version_line" ]; then
-				{
-					head -n $((first_version_line - 1)) CHANGELOG.md
-					echo ""
-					echo "## [$version] - $today"
-					echo ""
-					tail -n +"$first_version_line" CHANGELOG.md
-				} > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
-				echo "  Updated CHANGELOG.md with version $version"
-			fi
-		fi
-	fi
+	update_changelog
 else
 	echo "═══ reesql release $version (all targets) ═══"
 	echo "  (No new commits since $latest_tag. Rebuilding and re-uploading binaries.)"

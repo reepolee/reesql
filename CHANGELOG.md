@@ -6,8 +6,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ver
 date-based (`YY.M.PATCH`) and cut by `release.sh`, which inserts a heading for each new
 version and uses the text under it as the GitHub Release notes.
 
+Write the notes for the next release under `## [Unreleased]` below. `release.sh` renames
+that heading to the version it cuts, so the notes ship with the release rather than landing
+in an empty heading after the fact.
+
+## [Unreleased]
 
 ## [26.7.8] - 2026-07-22
+
+### Fixed
+
+- `<=>` (MySQL's null-safe equal) lexed as `<=` followed by `>`, and the shifts `<<` and
+  `>>` as two comparison tokens each. They round-tripped losslessly and happened to render
+  correctly, but nothing in the pipeline could tell they were one operator. They are now
+  single tokens.
+
+### Changed
+
+- `CHANGELOG.md` is populated, so releases carry real notes instead of a placeholder.
 
 ## [26.7.7] - 2026-07-22
 
