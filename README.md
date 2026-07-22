@@ -8,14 +8,21 @@ A MySQL SQL formatter written in Rust. Reads SQL from stdin or a file, and write
 
 ## Features
 
+- **Whitespace and keyword case only** - formatting changes indentation, line breaks and the case of
+  keywords. Every other character is preserved exactly, in order. This is enforced by a test that runs
+  over all fixtures, so the formatter can never silently rewrite what your SQL does
 - **Keyword uppercasing** - SQL keywords (`SELECT`, `FROM`, `WHERE`, `CREATE`, `INSERT`, etc.) are uppercased
 - **CREATE TABLE formatting** - column names and types aligned, constraints on separate lines, types uppercased
 - **CREATE VIEW formatting** - select columns on separate lines with `AS` alignment, JOINs indented
 - **UPDATE formatting** - `SET` assignments on indented lines, `WHERE` on its own line
 - **DELETE formatting** - `WHERE` clause on its own line
-- **INSERT formatting** - multi-line value tuples when they exceed 100 characters
+- **INSERT formatting** - multi-line value tuples when they exceed 100 characters; trailing
+  `RETURNING` / `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` clauses are kept
 - **Subquery formatting** - `(SELECT ...)` subqueries indented on separate lines
-- **Operator support** - comparison operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`) are preserved and spaced correctly
+- **CREATE TRIGGER formatting** - `BEGIN ... END;` bodies are recognised, so the inner `;` does not
+  split the statement; body statements are formatted normally and indented
+- **Operator support** - comparison (`>`, `<`, `>=`, `<=`, `!=`, `<>`) and arithmetic (`+`, `-`, `/`, `%`)
+  operators are preserved and spaced correctly. `!=` and `<>` each keep the spelling you wrote
 - **Comment preservation** - `--`, `/* */`, and `#` comments are preserved and positioned correctly
 - **In-place file editing** - pass a file path to format it in place, or use stdin/stdout
 - **Cross-platform** - normalizes `\r\n` and `\n` line endings consistently
@@ -227,7 +234,28 @@ select * from users where age >= 18 and age <= 65 and name != 'admin' and status
 
 **Output:**
 ```sql
-SELECT * FROM users WHERE age >= 18 AND age <= 65 AND name != 'admin' AND status != 'inactive';
+SELECT * FROM users WHERE age >= 18 AND age <= 65 AND name != 'admin' AND status <> 'inactive';
+```
+
+Note that `!=` and `<>` are each left as written - reesql does not normalize one into the other.
+
+### CREATE TRIGGER
+
+**Input:**
+```sql
+create trigger clubs_update_timestamp after update on clubs for each row begin update clubs set updated_at = CURRENT_TIMESTAMP where id = new.id;
+
+end;
+```
+
+**Output:**
+```sql
+CREATE TRIGGER clubs_update_timestamp AFTER UPDATE ON clubs FOR EACH ROW BEGIN
+    UPDATE clubs
+    SET
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = new.id;
+END;
 ```
 
 ## Supported statement types
@@ -238,6 +266,7 @@ SELECT * FROM users WHERE age >= 18 AND age <= 65 AND name != 'admin' AND status
 | `CREATE TABLE` | Aligned column definitions, types uppercased, constraints on separate lines |
 | `CREATE VIEW` | Aligned SELECT columns with AS, indented JOINs |
 | `CREATE INDEX` | Uppercased, compact |
+| `CREATE TRIGGER` | Header and `BEGIN` on one line, body indented, `END;` on its own line |
 | `INSERT` | Multi-line value tuples for long inputs |
 | `UPDATE` | SET assignments on indented lines, WHERE on its own line |
 | `DELETE` | WHERE clause on its own line |
@@ -245,14 +274,14 @@ SELECT * FROM users WHERE age >= 18 AND age <= 65 AND name != 'admin' AND status
 
 ## How it works
 
-1. **Tokenization** - raw SQL is split into tokens: keywords, identifiers, operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`), comments, and strings
+1. **Tokenization** - raw SQL is split into tokens: keywords, identifiers, operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`, `+`, `-`, `/`, `%`), comments, and strings. Characters with no specific rule are kept verbatim rather than discarded
 2. **Statement splitting** - tokens are split at semicolons into individual statements
 3. **Type detection** - each statement is classified (CREATE TABLE, SELECT, INSERT, UPDATE, etc.)
 4. **Formatting** - each statement type has a dedicated formatter that produces well-structured output; subqueries are formatted recursively with indentation
 
 ## Testing
 
-The project includes **32 integration tests**. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
+The project includes **39 integration tests**. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
 
 ```bash
 # Run all integration tests

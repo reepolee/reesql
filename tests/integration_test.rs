@@ -131,6 +131,73 @@ fn test_sqlite_features() {
     run_golden_test("sqlite_features");
 }
 
+#[test]
+fn test_create_trigger() {
+    run_golden_test("create_trigger");
+}
+
+#[test]
+fn test_arithmetic() {
+    run_golden_test("arithmetic");
+}
+
+#[test]
+fn test_mysql_syntax() {
+    run_golden_test("mysql_syntax");
+}
+
+/// A trigger's BEGIN...END body holds its own `;`, which must not split the statement
+/// and leave a stray `END;` behind.
+#[test]
+fn test_trigger_body_is_not_split_on_inner_semicolon() {
+    let input = "CREATE TRIGGER t AFTER UPDATE ON x FOR EACH ROW BEGIN \
+                 UPDATE x SET a = 1 WHERE id = NEW.id;\n\nEND;\n";
+    let (status, stdout, stderr) = run_reesql(input);
+
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert!(
+        stdout.trim_end().ends_with("END;"),
+        "END; should close the trigger, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("\n\nEND;"),
+        "END; was left stranded as its own statement:\n{stdout}"
+    );
+}
+
+#[test]
+fn test_unterminated_trigger_body_is_rejected() {
+    let input = "CREATE TRIGGER t AFTER UPDATE ON x FOR EACH ROW BEGIN \
+                 UPDATE x SET a = 1 WHERE id = NEW.id;\n";
+    let (status, stdout, stderr) = run_reesql(input);
+
+    assert_eq!(status.code(), Some(1), "expected a clean refusal: {stderr}");
+    assert!(stdout.is_empty(), "nothing should be written on refusal, got: {stdout}");
+    assert!(stderr.contains("missing `END`"), "unexpected error: {stderr}");
+}
+
+/// Operators used to be dropped by the tokenizer, silently changing what the SQL computed.
+#[test]
+fn test_operators_are_never_dropped() {
+    for (input, expected) in [
+        ("select a + b from t;", "SELECT a + b FROM t;"),
+        ("select a - b from t;", "SELECT a - b FROM t;"),
+        ("select a / b from t;", "SELECT a / b FROM t;"),
+        ("select a % b from t;", "SELECT a % b FROM t;"),
+        // Both spellings of "not equal" survive as written.
+        ("select * from t where a <> 1;", "SELECT * FROM t WHERE a <> 1;"),
+        ("select * from t where a != 1;", "SELECT * FROM t WHERE a != 1;"),
+        // Double-quoted identifiers keep their quotes.
+        ("select \"my col\" from t;", "SELECT \"my col\" FROM t;"),
+        // A lone `-` must not be mistaken for the start of a comment.
+        ("select 5-3 from t;", "SELECT 5 - 3 FROM t;"),
+    ] {
+        let (status, stdout, stderr) = run_reesql(input);
+        assert!(status.success(), "reesql failed on {input:?}: {stderr}");
+        assert_eq!(stdout.trim_end(), expected, "for input {input:?}");
+    }
+}
+
 /// An INSERT missing its `;` used to swallow the next statement into a VALUES tuple,
 /// silently deleting `CREATE TABLE members` and joining the rest without spaces.
 #[test]
@@ -249,6 +316,40 @@ fn test_create_table_without_column_list_is_left_alone() {
         assert!(status.success(), "reesql failed on {input:?}: {stderr}");
         assert_eq!(stdout.trim_end(), expected, "for input {input:?}");
     }
+}
+
+/// The core guarantee: formatting only ever changes whitespace and the case of keywords.
+/// Every other character must survive, in order. Stripping whitespace and uppercasing both
+/// sides normalises away exactly the two permitted changes, so any remaining difference is
+/// the formatter altering the SQL itself.
+#[test]
+fn test_formatting_only_changes_whitespace_and_case() {
+    let squash = |s: &str| -> String {
+        s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_uppercase()
+    };
+
+    let mut checked = 0;
+    for entry in fs::read_dir(DATA_DIR).expect("read tests/data") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".input.sql") {
+            continue;
+        }
+
+        let input = fs::read_to_string(&path).expect("read input");
+        let (status, stdout, stderr) = run_reesql(&input);
+        assert!(status.success(), "reesql failed on {name}: {stderr}");
+
+        assert_eq!(
+            squash(&input),
+            squash(&stdout),
+            "\n❌ {name}: formatting changed more than whitespace and keyword case\n\
+             input:\n{input}\noutput:\n{stdout}"
+        );
+        checked += 1;
+    }
+
+    assert!(checked > 0, "no .input.sql fixtures were checked");
 }
 
 fn run_reesql(input: &str) -> (std::process::ExitStatus, String, String) {

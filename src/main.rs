@@ -50,9 +50,15 @@ enum Token {
     LessThan,
     GreaterOrEqual,
     LessOrEqual,
-    NotEquals,
+    /// `!=` or `<>` — the source spelling is kept so formatting never rewrites it.
+    NotEquals(&'static str),
     Concat,
     DoubleColon,
+    /// Arithmetic operator (`+`, `-`, `/`, `%`), spaced like the comparison operators.
+    Operator(char),
+    /// Any other character the tokenizer has no specific rule for. Kept verbatim so that
+    /// formatting never deletes part of the input.
+    Symbol(char),
 }
 
 static KEYWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
@@ -252,7 +258,7 @@ fn token_width(tok: &Token) -> usize {
         Token::Word(w) => w.len(),
         Token::Star => 1,
         Token::Comment(_) => 0,
-        Token::GreaterOrEqual | Token::LessOrEqual | Token::NotEquals | Token::Concat | Token::DoubleColon => 2,
+        Token::GreaterOrEqual | Token::LessOrEqual | Token::NotEquals(_) | Token::Concat | Token::DoubleColon => 2,
         _ => 1,
     }
 }
@@ -314,7 +320,7 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
                     tokens.push(Token::LessOrEqual);
                     i += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    tokens.push(Token::NotEquals);
+                    tokens.push(Token::NotEquals("<>"));
                     i += 2;
                 } else {
                     tokens.push(Token::LessThan);
@@ -326,14 +332,16 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
                     tokens.push(Token::Concat);
                     i += 2;
                 } else {
+                    tokens.push(Token::Operator('|'));
                     i += 1;
                 }
             }
             '!' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::NotEquals);
+                    tokens.push(Token::NotEquals("!="));
                     i += 2;
                 } else {
+                    tokens.push(Token::Operator('!'));
                     i += 1;
                 }
             }
@@ -342,6 +350,8 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
                     tokens.push(Token::DoubleColon);
                     i += 2;
                 } else {
+                    // Lone `:` — part of MySQL's `:=`, or a bind parameter.
+                    tokens.push(Token::Symbol(':'));
                     i += 1;
                 }
             }
@@ -366,6 +376,16 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
                 let start = i;
                 i += 1;
                 while i < chars.len() && chars[i] != '`' {
+                    i += 1;
+                }
+                if i < chars.len() { i += 1; }
+                tokens.push(Token::Word(chars[start..i].iter().collect()));
+            }
+            // Double-quoted identifier: keep the quotes, they are part of the name.
+            '"' => {
+                let start = i;
+                i += 1;
+                while i < chars.len() && chars[i] != '"' {
                     i += 1;
                 }
                 if i < chars.len() { i += 1; }
@@ -400,7 +420,15 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
                 }
                 tokens.push(Token::Word(chars[start..i].iter().collect()));
             }
+            // Reached only after the `--`, `/*` and `#` comment rules above, so a lone `-`
+            // or `/` here really is an operator. Nothing is discarded: dropping a character
+            // silently changes what the SQL means.
             _ => {
+                if matches!(c, '+' | '-' | '/' | '%') {
+                    tokens.push(Token::Operator(c));
+                } else {
+                    tokens.push(Token::Symbol(c));
+                }
                 i += 1;
             }
         }
@@ -425,6 +453,11 @@ fn split_statements(tokens: &[Token], token_lines: &[usize]) -> Vec<Statement> {
     let mut start_line = 1;
     // A statement can open with comments; report the line of the SQL itself, not the comment.
     let mut start_is_comment = false;
+    // A trigger's BEGIN...END body holds its own `;`, which must not split the statement.
+    let mut words_seen = 0;
+    let mut starts_with_create = false;
+    let mut is_trigger = false;
+    let mut body_depth = 0isize;
 
     for (idx, tok) in tokens.iter().enumerate() {
         let line = token_lines.get(idx).copied().unwrap_or(1);
@@ -436,13 +469,31 @@ fn split_statements(tokens: &[Token], token_lines: &[usize]) -> Vec<Statement> {
             start_line = line;
             start_is_comment = false;
         }
+
+        if let Token::Word(w) = tok {
+            if words_seen < 3 {
+                words_seen += 1;
+                if words_seen == 1 {
+                    starts_with_create = w.eq_ignore_ascii_case("CREATE");
+                } else if starts_with_create && w.eq_ignore_ascii_case("TRIGGER") {
+                    is_trigger = true;
+                }
+            }
+            if is_trigger {
+                body_depth = (body_depth + block_depth_delta(w)).max(0);
+            }
+        }
+
         let is_semi = matches!(tok, Token::Semicolon);
         current.push(tok.clone());
-        if is_semi {
+        if is_semi && body_depth == 0 {
             statements.push(Statement {
                 tokens: std::mem::take(&mut current),
                 line: start_line,
             });
+            words_seen = 0;
+            starts_with_create = false;
+            is_trigger = false;
         }
     }
 
@@ -472,9 +523,11 @@ fn token_upper_string(tok: &Token) -> String {
         Token::GreaterThan => ">".into(),
         Token::LessThan => "<".into(),
         Token::GreaterOrEqual => ">=".into(),
-        Token::LessOrEqual => "<=".into(),            Token::NotEquals => "!=".into(),
+        Token::LessOrEqual => "<=".into(),
+        Token::NotEquals(s) => (*s).into(),
         Token::Concat => "||".into(),
         Token::DoubleColon => "::".into(),
+        Token::Operator(c) | Token::Symbol(c) => c.to_string(),
     }
 }
 
@@ -506,6 +559,7 @@ fn tokens_upper_string(tokens: &[Token]) -> String {
             (Some(Token::Word(_)), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::Equals) => true,
             (Some(Token::Equals), Token::Word(_)) => true,
+            (Some(Token::Equals), Token::OpenParen) => true,
             (Some(Token::CloseParen), Token::Word(_)) => true,
             (Some(Token::Comma), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::Star) => true,
@@ -521,10 +575,20 @@ fn tokens_upper_string(tokens: &[Token]) -> String {
             (Some(Token::GreaterOrEqual), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::LessOrEqual) => true,
             (Some(Token::LessOrEqual), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::NotEquals) => true,
-            (Some(Token::NotEquals), Token::Word(_)) => true,
+            (Some(Token::Word(_)), Token::NotEquals(_)) => true,
+            (Some(Token::NotEquals(_)), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::Concat) => true,
             (Some(Token::Concat), Token::Word(_)) => true,
+            (Some(Token::Word(_)), Token::Operator(_)) => true,
+            (Some(Token::Operator(_)), Token::Word(_)) => true,
+            (Some(Token::CloseParen), Token::Operator(_)) => true,
+            (Some(Token::Comment(c)), Token::Operator(_)) if !c.starts_with("--") && !c.starts_with('#') => true,
+            // A closing bracket separates from what follows, like a closing paren does.
+            (Some(Token::Symbol(']')), Token::Word(_)) => true,
+            // Detach a symbol from a preceding word (`SET @x`), but never split a
+            // bracketed subscript like `a[1]`. Nothing is glued to what follows, so
+            // prefixes such as `@x` and `:=` stay intact.
+            (Some(Token::Word(_)), Token::Symbol(c)) if !matches!(c, '[' | ']' | '{' | '}') => true,
             _ => false,
         };
         if need_space {
@@ -618,6 +682,34 @@ fn is_create_index(tokens: &[Token]) -> bool {
         }
     }
     false
+}
+
+/// Matches `CREATE [TEMP|TEMPORARY] TRIGGER ...`.
+fn is_create_trigger(tokens: &[Token]) -> bool {
+    let words: Vec<&String> = tokens
+        .iter()
+        .filter_map(|t| match t {
+            Token::Word(w) => Some(w),
+            _ => None,
+        })
+        .take(3)
+        .collect();
+
+    words.len() >= 2
+        && words[0].eq_ignore_ascii_case("CREATE")
+        && words[1..].iter().any(|w| w.eq_ignore_ascii_case("TRIGGER"))
+}
+
+/// `BEGIN` and `CASE` open a block that `END` closes. Used to tell a trigger's body
+/// apart from the statement terminator, since its inner `;` do not end the trigger.
+fn block_depth_delta(word: &str) -> isize {
+    if word.eq_ignore_ascii_case("BEGIN") || word.eq_ignore_ascii_case("CASE") {
+        1
+    } else if word.eq_ignore_ascii_case("END") {
+        -1
+    } else {
+        0
+    }
 }
 
 #[derive(Debug)]
@@ -964,6 +1056,92 @@ fn parse_value_tuples(tokens: &[Token]) -> Result<(Vec<Vec<Token>>, Vec<Token>),
 
 fn format_create_index(tokens: &[Token]) -> String {
     tokens_upper_string(tokens)
+}
+
+/// Lays out `CREATE TRIGGER ... BEGIN <body> END;` with the header and `BEGIN` on one line,
+/// each body statement formatted normally and indented, and `END;` on its own line.
+fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
+    let begin_idx = tokens
+        .iter()
+        .position(|t| matches!(t, Token::Word(w) if w.eq_ignore_ascii_case("BEGIN")));
+
+    // No body block to lay out (or one not yet typed): keep every token as-is.
+    let Some(begin_idx) = begin_idx else {
+        return format_generic(tokens);
+    };
+
+    let mut depth = 1isize;
+    let mut end_idx = None;
+    for (i, tok) in tokens.iter().enumerate().skip(begin_idx + 1) {
+        if let Token::Word(w) = tok {
+            depth += block_depth_delta(w);
+            if depth == 0 {
+                end_idx = Some(i);
+                break;
+            }
+        }
+    }
+
+    let Some(end_idx) = end_idx else {
+        return Err("this CREATE TRIGGER has an unterminated body: missing `END`".to_string());
+    };
+
+    let mut result = tokens_upper_string(&tokens[..=begin_idx]);
+    result.push('\n');
+
+    for stmt in split_trigger_body(&tokens[begin_idx + 1..end_idx]) {
+        let formatted = format_statement(&stmt)?;
+        for line in formatted.lines() {
+            if line.is_empty() {
+                result.push('\n');
+            } else {
+                result.push_str("    ");
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+    }
+
+    result.push_str("END");
+    // Anything between END and the terminator (rare, but never drop it).
+    let trailing = tokens_upper_string(
+        tokens[end_idx + 1..]
+            .split_last()
+            .filter(|(last, _)| matches!(last, Token::Semicolon))
+            .map_or(&tokens[end_idx + 1..], |(_, rest)| rest),
+    );
+    if !trailing.is_empty() {
+        result.push(' ');
+        result.push_str(&trailing);
+    }
+    if matches!(tokens.last(), Some(Token::Semicolon)) {
+        result.push(';');
+    }
+
+    Ok(result)
+}
+
+/// Splits a trigger body into its statements, keeping each terminating `;` attached.
+fn split_trigger_body(tokens: &[Token]) -> Vec<Vec<Token>> {
+    let mut statements = Vec::new();
+    let mut current = Vec::new();
+    let mut depth = 0isize;
+
+    for tok in tokens {
+        if let Token::Word(w) = tok {
+            depth = (depth + block_depth_delta(w)).max(0);
+        }
+        current.push(tok.clone());
+        if matches!(tok, Token::Semicolon) && depth == 0 {
+            statements.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() {
+        statements.push(current);
+    }
+
+    statements
 }
 
 fn format_drop(tokens: &[Token]) -> String {
@@ -1424,7 +1602,7 @@ fn format_generic(tokens: &[Token]) -> Result<String, String> {
                         | Token::LessThan
                         | Token::GreaterOrEqual
                         | Token::LessOrEqual
-                        | Token::NotEquals
+                        | Token::NotEquals(_)
                 )
             });
             if need_space_before {
@@ -1474,6 +1652,7 @@ fn format_generic(tokens: &[Token]) -> Result<String, String> {
             (Some(Token::Word(_)), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::Equals) => true,
             (Some(Token::Equals), Token::Word(_)) => true,
+            (Some(Token::Equals), Token::OpenParen) => true,
             (Some(Token::CloseParen), Token::Word(_)) => true,
             (Some(Token::Comma), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::Star) => true,
@@ -1489,10 +1668,20 @@ fn format_generic(tokens: &[Token]) -> Result<String, String> {
             (Some(Token::GreaterOrEqual), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::LessOrEqual) => true,
             (Some(Token::LessOrEqual), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::NotEquals) => true,
-            (Some(Token::NotEquals), Token::Word(_)) => true,
+            (Some(Token::Word(_)), Token::NotEquals(_)) => true,
+            (Some(Token::NotEquals(_)), Token::Word(_)) => true,
             (Some(Token::Word(_)), Token::Concat) => true,
             (Some(Token::Concat), Token::Word(_)) => true,
+            (Some(Token::Word(_)), Token::Operator(_)) => true,
+            (Some(Token::Operator(_)), Token::Word(_)) => true,
+            (Some(Token::CloseParen), Token::Operator(_)) => true,
+            (Some(Token::Comment(c)), Token::Operator(_)) if !c.starts_with("--") && !c.starts_with('#') => true,
+            // A closing bracket separates from what follows, like a closing paren does.
+            (Some(Token::Symbol(']')), Token::Word(_)) => true,
+            // Detach a symbol from a preceding word (`SET @x`), but never split a
+            // bracketed subscript like `a[1]`. Nothing is glued to what follows, so
+            // prefixes such as `@x` and `:=` stay intact.
+            (Some(Token::Word(_)), Token::Symbol(c)) if !matches!(c, '[' | ']' | '{' | '}') => true,
             _ => false,
         };
 
@@ -1513,7 +1702,9 @@ fn format_statement(tokens: &[Token]) -> Result<String, String> {
         return Ok(String::new());
     }
 
-    if is_create_table(tokens) {
+    if is_create_trigger(tokens) {
+        format_create_trigger(tokens)
+    } else if is_create_table(tokens) {
         format_create_table(tokens)
     } else if let Some(select_pos) = is_create_view(tokens) {
         Ok(format_create_view(tokens, select_pos))
