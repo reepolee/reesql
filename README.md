@@ -69,6 +69,17 @@ cat query.sql | reesql
 echo "SELECT * FROM users WHERE active = 1;" | reesql
 ```
 
+### Invalid SQL
+
+When reesql cannot format a statement without losing or garbling SQL, it refuses rather than
+guessing. It reports the line and reason on stderr, exits `1`, writes nothing to stdout, and
+leaves the input file untouched:
+
+```
+reesql: schema.sql:35: this INSERT runs into `CREATE` between its VALUES tuples (is it missing its `;`, or a value list?)
+reesql: refusing to format invalid SQL; input left unchanged
+```
+
 ## Examples
 
 ### SELECT with JOIN
@@ -241,7 +252,7 @@ SELECT * FROM users WHERE age >= 18 AND age <= 65 AND name != 'admin' AND status
 
 ## Testing
 
-The project includes **19 integration tests** that format sample SQL inputs and compare the output against golden files.
+The project includes **32 integration tests**. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
 
 ```bash
 # Run all integration tests

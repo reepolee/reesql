@@ -67,7 +67,7 @@ static KEYWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
         "DATABASE", "DATABASES", "DAY_HOUR", "DAY_MICROSECOND", "DAY_MINUTE",
         "DAY_SECOND", "DEC", "DECIMAL", "DECLARE", "DEFAULT", "DELAYED", "DELETE",
         "DENSE_RANK", "DESC", "DESCRIBE", "DETERMINISTIC", "DISTINCT", "DISTINCTROW",
-        "DIV", "DOUBLE", "DROP", "DUAL", "EACH", "ELSE", "ELSEIF", "EMPTY", "ENCLOSED",
+        "DIV", "DOUBLE", "DROP", "DUAL", "DUPLICATE", "EACH", "ELSE", "ELSEIF", "EMPTY", "ENCLOSED",
         "ESCAPED", "EXCEPT", "EXISTS", "EXIT", "EXPLAIN", "FALSE", "FETCH", "FLOAT",
         "FLOAT4", "FLOAT8", "FOR", "FORCE", "FOREIGN", "FROM", "FULLTEXT", "FUNCTION",
         "GENERATED", "GET", "GRANT", "GROUP", "GROUPING", "GROUPS", "HAVING",
@@ -270,12 +270,27 @@ fn tokens_display_width(tokens: &[Token]) -> usize {
     width
 }
 
-fn tokenize(input: &str) -> Vec<Token> {
+/// Tokenizes `input`, returning the tokens and the 1-based source line each one starts on.
+/// The line numbers are only used to point at the offending spot when formatting is refused.
+fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
     let mut tokens = Vec::new();
+    let mut token_lines = Vec::new();
     let chars: Vec<char> = input.chars().collect();
+
+    let mut line_of = Vec::with_capacity(chars.len());
+    let mut line = 1;
+    for &c in &chars {
+        line_of.push(line);
+        if c == '\n' {
+            line += 1;
+        }
+    }
+
     let mut i = 0;
 
     while i < chars.len() {
+        let tok_start = i;
+        let tokens_before = tokens.len();
         let c = chars[i];
         match c {
             '(' => { tokens.push(Token::OpenParen); i += 1; }
@@ -389,25 +404,53 @@ fn tokenize(input: &str) -> Vec<Token> {
                 i += 1;
             }
         }
+
+        // Every arm above pushes at most one token, so one line entry per token stays in sync.
+        if tokens.len() > tokens_before {
+            token_lines.push(line_of[tok_start]);
+        }
     }
 
-    tokens
+    (tokens, token_lines)
 }
 
-fn split_statements(tokens: &[Token]) -> Vec<Vec<Token>> {
+struct Statement {
+    tokens: Vec<Token>,
+    line: usize,
+}
+
+fn split_statements(tokens: &[Token], token_lines: &[usize]) -> Vec<Statement> {
     let mut statements = Vec::new();
     let mut current = Vec::new();
+    let mut start_line = 1;
+    // A statement can open with comments; report the line of the SQL itself, not the comment.
+    let mut start_is_comment = false;
 
-    for tok in tokens {
+    for (idx, tok) in tokens.iter().enumerate() {
+        let line = token_lines.get(idx).copied().unwrap_or(1);
+        let is_comment = matches!(tok, Token::Comment(_));
+        if current.is_empty() {
+            start_line = line;
+            start_is_comment = is_comment;
+        } else if start_is_comment && !is_comment {
+            start_line = line;
+            start_is_comment = false;
+        }
         let is_semi = matches!(tok, Token::Semicolon);
         current.push(tok.clone());
         if is_semi {
-            statements.push(std::mem::take(&mut current));
+            statements.push(Statement {
+                tokens: std::mem::take(&mut current),
+                line: start_line,
+            });
         }
     }
 
     if !current.is_empty() {
-        statements.push(current);
+        statements.push(Statement {
+            tokens: current,
+            line: start_line,
+        });
     }
 
     statements
@@ -668,36 +711,47 @@ fn split_type_and_constraints(tokens: &[Token]) -> (Vec<Token>, Vec<Token>) {
     (tokens.to_vec(), vec![])
 }
 
-fn format_create_table(tokens: &[Token]) -> String {
+fn format_create_table(tokens: &[Token]) -> Result<String, String> {
     // Find opening paren position
     let open_paren_pos = tokens.iter().position(|t| matches!(t, Token::OpenParen));
+
+    // No column list: CREATE TABLE ... AS SELECT / LIKE, or a definition still being typed.
+    // Emitting the column-list layout here would append a `(` that is not in the source.
+    let Some(paren_pos) = open_paren_pos else {
+        return format_generic(tokens);
+    };
 
     let mut result = String::new();
 
     // Format: CREATE TABLE [IF NOT EXISTS] name (
-    let open_pos = open_paren_pos.unwrap_or(tokens.len());
-    let prelude = &tokens[..open_pos];
+    let prelude = &tokens[..paren_pos];
     let prelude_str = tokens_upper_string(prelude);
     result.push_str(&prelude_str);
     result.push_str(" (\n");
 
-    if let Some(paren_pos) = open_paren_pos {
+    {
         // Find matching close paren
         let mut depth = 0;
-        let mut close_pos = tokens.len();
+        let mut close_pos = None;
         for (i, tok) in tokens.iter().enumerate().skip(paren_pos) {
             match tok {
                 Token::OpenParen => depth += 1,
                 Token::CloseParen => {
                     depth -= 1;
                     if depth == 0 {
-                        close_pos = i;
+                        close_pos = Some(i);
                         break;
                     }
                 }
                 _ => {}
             }
         }
+
+        let Some(close_pos) = close_pos else {
+            return Err(
+                "this CREATE TABLE has an unterminated column list: missing `)`".to_string()
+            );
+        };
 
         let inner_tokens = &tokens[paren_pos + 1..close_pos];
 
@@ -767,10 +821,10 @@ fn format_create_table(tokens: &[Token]) -> String {
         result.push(';');
     }
 
-    result
+    Ok(result)
 }
 
-fn format_insert(tokens: &[Token]) -> String {
+fn format_insert(tokens: &[Token]) -> Result<String, String> {
     let values_pos = tokens.iter().position(|t| {
         if let Token::Word(w) = t {
             w.to_uppercase() == "VALUES"
@@ -780,7 +834,7 @@ fn format_insert(tokens: &[Token]) -> String {
     });
 
     let Some(values_idx) = values_pos else {
-        return tokens_upper_string(tokens);
+        return Ok(tokens_upper_string(tokens));
     };
 
     let prelude = &tokens[..=values_idx];
@@ -790,8 +844,8 @@ fn format_insert(tokens: &[Token]) -> String {
     // Insert space before the column list paren
     prelude_str = prelude_str.replacen("(", " (", 1);
 
-    // Parse value tuples
-    let tuples = parse_value_tuples(values_tokens);
+    // Parse value tuples, plus any clause that follows them (ON CONFLICT, RETURNING, ...)
+    let (tuples, tail) = parse_value_tuples(values_tokens)?;
 
     let semicolon = if matches!(tokens.last(), Some(Token::Semicolon)) {
         ";"
@@ -799,16 +853,28 @@ fn format_insert(tokens: &[Token]) -> String {
         ""
     };
 
+    let tail_str = if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", tokens_upper_string(&tail))
+    };
+
     let compact = {
         let tuple_strs: Vec<String> = tuples
             .iter()
             .map(|t| format!("({})", tokens_upper_string_nospace(t)))
             .collect();
-        format!("{} {}{}", prelude_str, tuple_strs.join(", "), semicolon)
+        format!(
+            "{} {}{}{}",
+            prelude_str,
+            tuple_strs.join(", "),
+            tail_str,
+            semicolon
+        )
     };
 
     if compact.len() <= 100 {
-        return compact;
+        return Ok(compact);
     }
 
     // Multi-line format
@@ -818,26 +884,35 @@ fn format_insert(tokens: &[Token]) -> String {
         if i < tuples.len() - 1 {
             result.push_str(&format!("{},\n", tup_str));
         } else {
-            result.push_str(&format!("{}{}\n", tup_str, semicolon));
+            result.push_str(&format!("{}{}{}\n", tup_str, tail_str, semicolon));
         }
     }
 
     // Trim trailing newline if it ends with the semicolon line already
-    result.trim_end_matches('\n').to_string()
+    Ok(result.trim_end_matches('\n').to_string())
 }
 
-fn parse_value_tuples(tokens: &[Token]) -> Vec<Vec<Token>> {
+/// Splits the tokens after `VALUES` into the value tuples and whatever clause trails them
+/// (`ON CONFLICT ...`, `ON DUPLICATE KEY ...`, `RETURNING ...`), which is returned verbatim.
+///
+/// Tuples are rendered without spaces between their tokens, so anything that is not really a
+/// value tuple must never be folded into one — and dropping it would lose SQL outright. When
+/// the token stream is not a value list, this fails instead of guessing.
+fn parse_value_tuples(tokens: &[Token]) -> Result<(Vec<Vec<Token>>, Vec<Token>), String> {
     let mut tuples = Vec::new();
     let mut current = Vec::new();
     let mut depth = 0;
     let mut in_tuple = false;
+    // Set by a comma that closed a tuple: the value list promises another tuple next.
+    let mut expect_tuple = false;
 
-    for tok in tokens {
+    for (idx, tok) in tokens.iter().enumerate() {
         match tok {
             Token::OpenParen if !in_tuple => {
                 in_tuple = true;
+                expect_tuple = false;
             }
-            Token::OpenParen if in_tuple => {
+            Token::OpenParen => {
                 depth += 1;
                 current.push(tok.clone());
             }
@@ -849,16 +924,42 @@ fn parse_value_tuples(tokens: &[Token]) -> Vec<Vec<Token>> {
                 depth -= 1;
                 current.push(tok.clone());
             }
-            Token::Comma if !in_tuple => {}
-            Token::Semicolon => {}
             _ if in_tuple => {
                 current.push(tok.clone());
             }
-            _ => {}
+            Token::Comma => {
+                expect_tuple = true;
+            }
+            Token::Semicolon => {}
+            other => {
+                // A keyword directly after a closed tuple opens a trailing clause. After a
+                // comma, or before any tuple at all, a value tuple was promised instead — so
+                // this is a statement that ran into the INSERT, not a clause.
+                if expect_tuple || tuples.is_empty() || !matches!(other, Token::Word(_)) {
+                    return Err(format!(
+                        "this INSERT runs into `{}` between its VALUES tuples \
+                         (is it missing its `;`, or a value list?)",
+                        token_upper_string(other)
+                    ));
+                }
+                // The statement's own `;` is re-emitted by the caller.
+                let mut tail = &tokens[idx..];
+                if let Some((Token::Semicolon, rest)) = tail.split_last() {
+                    tail = rest;
+                }
+                return Ok((tuples, tail.to_vec()));
+            }
         }
     }
 
-    tuples
+    if in_tuple {
+        return Err("this INSERT has an unterminated VALUES tuple: missing `)`".to_string());
+    }
+    if expect_tuple {
+        return Err("this INSERT ends on a trailing `,`: a VALUES tuple is missing".to_string());
+    }
+
+    Ok((tuples, Vec::new()))
 }
 
 fn format_create_index(tokens: &[Token]) -> String {
@@ -1300,7 +1401,7 @@ fn format_delete(tokens: &[Token]) -> String {
     result
 }
 
-fn format_generic(tokens: &[Token]) -> String {
+fn format_generic(tokens: &[Token]) -> Result<String, String> {
     let mut result = String::new();
     let mut prev_idx: Option<usize> = None;
     let mut i = 0;
@@ -1333,7 +1434,7 @@ fn format_generic(tokens: &[Token]) -> String {
             // Format subquery contents recursively
             let inner = &tokens[i + 1..close];
             let inner_sql = tokens_upper_string(inner);
-            let formatted = format_sql(&inner_sql);
+            let formatted = format_sql(&inner_sql).map_err(|e| e.message)?;
             let trimmed = formatted.trim();
 
             // Wrap in indented parens
@@ -1404,48 +1505,58 @@ fn format_generic(tokens: &[Token]) -> String {
         i += 1;
     }
 
-    result
+    Ok(result)
 }
 
-fn format_statement(tokens: &[Token]) -> String {
+fn format_statement(tokens: &[Token]) -> Result<String, String> {
     if tokens.is_empty() {
-        return String::new();
+        return Ok(String::new());
     }
 
     if is_create_table(tokens) {
         format_create_table(tokens)
     } else if let Some(select_pos) = is_create_view(tokens) {
-        format_create_view(tokens, select_pos)
+        Ok(format_create_view(tokens, select_pos))
     } else if is_insert(tokens) {
         format_insert(tokens)
     } else if is_create_index(tokens) {
-        format_create_index(tokens)
+        Ok(format_create_index(tokens))
     } else if is_drop(tokens) {
-        format_drop(tokens)
+        Ok(format_drop(tokens))
     } else if is_update(tokens) {
-        format_update(tokens)
+        Ok(format_update(tokens))
     } else if is_delete(tokens) {
-        format_delete(tokens)
+        Ok(format_delete(tokens))
     } else {
         format_generic(tokens)
     }
 }
 
-fn format_sql(input: &str) -> String {
+/// Refusal to format, pointing at the line the offending statement starts on.
+struct FormatError {
+    line: usize,
+    message: String,
+}
+
+fn format_sql(input: &str) -> Result<String, FormatError> {
     // Normalize line endings: strip \r so Windows CRLF and Unix LF are handled identically
     let input = input.replace("\r\n", "\n").replace('\r', "");
-    let tokens = tokenize(&input);
-    let statements = split_statements(&tokens);
+    let (tokens, token_lines) = tokenize(&input);
+    let statements = split_statements(&tokens, &token_lines);
 
     let mut result = String::new();
     let mut prev_type: Option<String> = None;
 
     for stmt in &statements {
-        if stmt.is_empty() || (stmt.len() == 1 && matches!(stmt[0], Token::Semicolon)) {
+        let toks = &stmt.tokens;
+        if toks.is_empty() || (toks.len() == 1 && matches!(toks[0], Token::Semicolon)) {
             continue;
         }
 
-        let formatted = format_statement(stmt);
+        let formatted = format_statement(toks).map_err(|message| FormatError {
+            line: stmt.line,
+            message,
+        })?;
         if formatted.is_empty() {
             continue;
         }
@@ -1453,7 +1564,7 @@ fn format_sql(input: &str) -> String {
         // Detect if we should add a blank line separator
         let current_type = {
             let mut stype = String::new();
-            for tok in stmt {
+            for tok in toks {
                 if let Token::Word(w) = tok {
                     stype.push_str(&w.to_uppercase());
                     stype.push(' ');
@@ -1476,7 +1587,7 @@ fn format_sql(input: &str) -> String {
         prev_type = Some(current_type);
     }
 
-    result
+    Ok(result)
 }
 
 fn main() {
@@ -1506,7 +1617,12 @@ fn main() {
         buf
     };
 
-    let output = format_sql(&input);
+    let source = cli.file.as_deref().unwrap_or("<stdin>");
+    let output = format_sql(&input).unwrap_or_else(|e| {
+        eprintln!("reesql: {}:{}: {}", source, e.line, e.message);
+        eprintln!("reesql: refusing to format invalid SQL; input left unchanged");
+        std::process::exit(1);
+    });
 
     if let Some(path) = &cli.file {
         fs::write(path, &output).unwrap_or_else(|e| {
