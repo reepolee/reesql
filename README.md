@@ -274,14 +274,26 @@ END;
 
 ## How it works
 
-1. **Tokenization** - raw SQL is split into tokens: keywords, identifiers, operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`, `+`, `-`, `/`, `%`), comments, and strings. Characters with no specific rule are kept verbatim rather than discarded
-2. **Statement splitting** - tokens are split at semicolons into individual statements
-3. **Type detection** - each statement is classified (CREATE TABLE, SELECT, INSERT, UPDATE, etc.)
-4. **Formatting** - each statement type has a dedicated formatter that produces well-structured output; subqueries are formatted recursively with indentation
+Every token **borrows its text from the input** rather than being rebuilt from a tag. Formatting
+therefore has only two powers: choosing the whitespace between tokens, and upper-casing a token
+that spells a keyword. It has no mechanism to alter or drop SQL, which is what makes the guarantee
+at the top of this README structural rather than a matter of test coverage.
+
+1. **Tokenization** - the source is split into tokens, each holding a slice of the original text.
+   Characters with no specific rule still become tokens; nothing is skipped
+2. **Tiling check** - the tokens are verified to account for every byte of the input that is not
+   whitespace. A lexer rule that skipped a character it did not recognise leaves a non-whitespace
+   gap here, and reesql refuses to format rather than emitting SQL with a piece missing
+3. **Statement splitting** - tokens are split at semicolons, except inside a trigger's `BEGIN ...
+   END` body, whose own semicolons do not end the statement
+4. **Type detection** - each statement is classified (CREATE TABLE, INSERT, UPDATE, etc.)
+5. **Formatting** - each statement type has a dedicated formatter that decides line breaks,
+   indentation and alignment. Nested contexts such as subqueries and trigger bodies recurse on
+   the tokens directly, never by rendering to text and re-parsing it
 
 ## Testing
 
-The project includes **39 integration tests**. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
+The project includes **39 integration tests** and 5 unit tests. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
 
 ```bash
 # Run all integration tests

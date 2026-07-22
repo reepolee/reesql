@@ -35,10 +35,12 @@ fn executable_dir() -> PathBuf {
         })
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum Token {
-    Word(String),
-    Comment(String),
+/// What a token is, for spacing and statement-shape decisions. The token's *text* always
+/// comes from the source, never from this tag — the tag only says how to space it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Word,
+    Comment,
     OpenParen,
     CloseParen,
     Comma,
@@ -50,15 +52,48 @@ enum Token {
     LessThan,
     GreaterOrEqual,
     LessOrEqual,
-    /// `!=` or `<>` — the source spelling is kept so formatting never rewrites it.
-    NotEquals(&'static str),
+    /// `!=` or `<>`; which one is answered by the token's text, not by this tag.
+    NotEquals,
     Concat,
     DoubleColon,
-    /// Arithmetic operator (`+`, `-`, `/`, `%`), spaced like the comparison operators.
-    Operator(char),
-    /// Any other character the tokenizer has no specific rule for. Kept verbatim so that
-    /// formatting never deletes part of the input.
-    Symbol(char),
+    /// Arithmetic or bitwise operator, spaced like the comparison operators.
+    Operator,
+    /// Any other character the tokenizer has no specific rule for.
+    Symbol,
+}
+
+/// A token borrows its text directly from the input. Formatting can therefore only ever
+/// re-emit the user's own bytes (optionally upper-cased, when they spell a keyword) plus
+/// whitespace it chooses to put between them — it has no way to invent or alter SQL.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Token<'a> {
+    kind: Kind,
+    text: &'a str,
+    line: usize,
+}
+
+impl<'a> Token<'a> {
+    fn is(&self, kind: Kind) -> bool {
+        self.kind == kind
+    }
+
+    fn is_word(&self, word: &str) -> bool {
+        self.kind == Kind::Word && self.text.eq_ignore_ascii_case(word)
+    }
+
+    /// A line comment runs to end of line, so what follows it must start on a new line.
+    fn is_line_comment(&self) -> bool {
+        self.kind == Kind::Comment && (self.text.starts_with("--") || self.text.starts_with('#'))
+    }
+
+    /// The only transformation the formatter is allowed to apply to a token's text.
+    fn emit(&self) -> String {
+        if self.kind == Kind::Word && is_keyword(self.text) {
+            self.text.to_uppercase()
+        } else {
+            self.text.to_string()
+        }
+    }
 }
 
 static KEYWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
@@ -254,12 +289,11 @@ fn is_table_constraint_start(word: &str) -> bool {
 }
 
 fn token_width(tok: &Token) -> usize {
-    match tok {
-        Token::Word(w) => w.len(),
-        Token::Star => 1,
-        Token::Comment(_) => 0,
-        Token::GreaterOrEqual | Token::LessOrEqual | Token::NotEquals(_) | Token::Concat | Token::DoubleColon => 2,
-        _ => 1,
+    // Comments do not participate in column alignment.
+    if tok.kind == Kind::Comment {
+        0
+    } else {
+        tok.text.chars().count()
     }
 }
 
@@ -267,21 +301,22 @@ fn tokens_display_width(tokens: &[Token]) -> usize {
     let mut width = 0;
     let mut prev_was_word = false;
     for tok in tokens {
-        if prev_was_word && matches!(tok, Token::Word(_)) {
+        if prev_was_word && tok.is(Kind::Word) {
             width += 1;
         }
         width += token_width(tok);
-        prev_was_word = matches!(tok, Token::Word(_));
+        prev_was_word = tok.is(Kind::Word);
     }
     width
 }
 
-/// Tokenizes `input`, returning the tokens and the 1-based source line each one starts on.
-/// The line numbers are only used to point at the offending spot when formatting is refused.
-fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
-    let mut tokens = Vec::new();
-    let mut token_lines = Vec::new();
+/// Tokenizes `input`. Every token borrows its text directly from `input`, so the tokens plus
+/// the whitespace between them account for every byte of the source — see [`tokens_tile`].
+fn tokenize(input: &str) -> Vec<Token<'_>> {
     let chars: Vec<char> = input.chars().collect();
+    // Byte offset of each char, so a char range can be turned into a slice of `input`.
+    let byte_at: Vec<usize> = input.char_indices().map(|(b, _)| b).collect();
+    let byte_of = |idx: usize| byte_at.get(idx).copied().unwrap_or(input.len());
 
     let mut line_of = Vec::with_capacity(chars.len());
     let mut line = 1;
@@ -292,75 +327,78 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
         }
     }
 
+    let mut tokens = Vec::new();
     let mut i = 0;
 
     while i < chars.len() {
-        let tok_start = i;
-        let tokens_before = tokens.len();
+        let start = i;
         let c = chars[i];
-        match c {
-            '(' => { tokens.push(Token::OpenParen); i += 1; }
-            ')' => { tokens.push(Token::CloseParen); i += 1; }
-            ',' => { tokens.push(Token::Comma); i += 1; }
-            ';' => { tokens.push(Token::Semicolon); i += 1; }
-            '=' => { tokens.push(Token::Equals); i += 1; }
-            '.' => { tokens.push(Token::Dot); i += 1; }
-            '*' => { tokens.push(Token::Star); i += 1; }
+
+        // Each arm advances `i` past the token and names its kind; the text is then taken
+        // from the source. No arm builds text of its own.
+        let kind = match c {
+            '(' => { i += 1; Some(Kind::OpenParen) }
+            ')' => { i += 1; Some(Kind::CloseParen) }
+            ',' => { i += 1; Some(Kind::Comma) }
+            ';' => { i += 1; Some(Kind::Semicolon) }
+            '=' => { i += 1; Some(Kind::Equals) }
+            '.' => { i += 1; Some(Kind::Dot) }
+            '*' => { i += 1; Some(Kind::Star) }
             '>' => {
-                if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::GreaterOrEqual);
+                if chars.get(i + 1) == Some(&'=') {
                     i += 2;
+                    Some(Kind::GreaterOrEqual)
                 } else {
-                    tokens.push(Token::GreaterThan);
                     i += 1;
+                    Some(Kind::GreaterThan)
                 }
             }
             '<' => {
-                if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::LessOrEqual);
+                if chars.get(i + 1) == Some(&'=') {
                     i += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    tokens.push(Token::NotEquals("<>"));
+                    Some(Kind::LessOrEqual)
+                } else if chars.get(i + 1) == Some(&'>') {
                     i += 2;
+                    Some(Kind::NotEquals)
                 } else {
-                    tokens.push(Token::LessThan);
                     i += 1;
+                    Some(Kind::LessThan)
                 }
             }
             '|' => {
-                if i + 1 < chars.len() && chars[i + 1] == '|' {
-                    tokens.push(Token::Concat);
+                if chars.get(i + 1) == Some(&'|') {
                     i += 2;
+                    Some(Kind::Concat)
                 } else {
-                    tokens.push(Token::Operator('|'));
                     i += 1;
+                    Some(Kind::Operator)
                 }
             }
             '!' => {
-                if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::NotEquals("!="));
+                if chars.get(i + 1) == Some(&'=') {
                     i += 2;
+                    Some(Kind::NotEquals)
                 } else {
-                    tokens.push(Token::Operator('!'));
                     i += 1;
+                    Some(Kind::Operator)
                 }
             }
             ':' => {
-                if i + 1 < chars.len() && chars[i + 1] == ':' {
-                    tokens.push(Token::DoubleColon);
+                if chars.get(i + 1) == Some(&':') {
                     i += 2;
+                    Some(Kind::DoubleColon)
                 } else {
                     // Lone `:` — part of MySQL's `:=`, or a bind parameter.
-                    tokens.push(Token::Symbol(':'));
                     i += 1;
+                    Some(Kind::Symbol)
                 }
             }
             '\'' => {
-                let start = i;
                 i += 1;
                 while i < chars.len() {
                     if chars[i] == '\'' {
-                        if i + 1 < chars.len() && chars[i + 1] == '\'' {
+                        // A doubled quote is an escaped quote, not the end of the literal.
+                        if chars.get(i + 1) == Some(&'\'') {
                             i += 2;
                         } else {
                             i += 1;
@@ -370,86 +408,115 @@ fn tokenize(input: &str) -> (Vec<Token>, Vec<usize>) {
                         i += 1;
                     }
                 }
-                tokens.push(Token::Word(chars[start..i].iter().collect()));
+                Some(Kind::Word)
             }
-            '`' => {
-                let start = i;
+            // Quoted identifiers keep their quotes: they are part of the name.
+            '`' | '"' => {
+                let quote = c;
                 i += 1;
-                while i < chars.len() && chars[i] != '`' {
+                while i < chars.len() && chars[i] != quote {
                     i += 1;
                 }
-                if i < chars.len() { i += 1; }
-                tokens.push(Token::Word(chars[start..i].iter().collect()));
-            }
-            // Double-quoted identifier: keep the quotes, they are part of the name.
-            '"' => {
-                let start = i;
-                i += 1;
-                while i < chars.len() && chars[i] != '"' {
+                if i < chars.len() {
                     i += 1;
                 }
-                if i < chars.len() { i += 1; }
-                tokens.push(Token::Word(chars[start..i].iter().collect()));
+                Some(Kind::Word)
             }
-            _ if c == '-' && i + 1 < chars.len() && chars[i + 1] == '-' => {
-                let start = i;
-                while i < chars.len() && chars[i] != '\n' { i += 1; }
-                tokens.push(Token::Comment(chars[start..i].iter().collect()));
+            _ if c == '-' && chars.get(i + 1) == Some(&'-') => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                Some(Kind::Comment)
             }
-            _ if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' => {
-                let start = i;
+            _ if c == '/' && chars.get(i + 1) == Some(&'*') => {
                 i += 2;
                 while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
                     i += 1;
                 }
-                if i + 1 < chars.len() { i += 2; } else { i = chars.len(); }
-                tokens.push(Token::Comment(chars[start..i].iter().collect()));
+                if i + 1 < chars.len() {
+                    i += 2;
+                } else {
+                    i = chars.len();
+                }
+                Some(Kind::Comment)
             }
-            _ if c == '#' => {
-                let start = i;
-                while i < chars.len() && chars[i] != '\n' { i += 1; }
-                tokens.push(Token::Comment(chars[start..i].iter().collect()));
+            '#' => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                Some(Kind::Comment)
             }
             _ if c.is_whitespace() => {
                 i += 1;
+                None
             }
             _ if c.is_alphanumeric() || c == '_' => {
-                let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
-                tokens.push(Token::Word(chars[start..i].iter().collect()));
+                Some(Kind::Word)
             }
-            // Reached only after the `--`, `/*` and `#` comment rules above, so a lone `-`
-            // or `/` here really is an operator. Nothing is discarded: dropping a character
-            // silently changes what the SQL means.
+            // Reached only after the `--`, `/*` and `#` rules above, so a lone `-` or `/`
+            // here really is an operator. Every remaining character is still kept: dropping
+            // one would silently change what the SQL means.
             _ => {
-                if matches!(c, '+' | '-' | '/' | '%') {
-                    tokens.push(Token::Operator(c));
-                } else {
-                    tokens.push(Token::Symbol(c));
-                }
                 i += 1;
+                if matches!(c, '+' | '-' | '/' | '%' | '&' | '^' | '~') {
+                    Some(Kind::Operator)
+                } else {
+                    Some(Kind::Symbol)
+                }
             }
-        }
+        };
 
-        // Every arm above pushes at most one token, so one line entry per token stays in sync.
-        if tokens.len() > tokens_before {
-            token_lines.push(line_of[tok_start]);
+        if let Some(kind) = kind {
+            tokens.push(Token {
+                kind,
+                text: &input[byte_of(start)..byte_of(i)],
+                line: line_of[start],
+            });
         }
     }
 
-    (tokens, token_lines)
+    tokens
 }
 
-struct Statement {
-    tokens: Vec<Token>,
+/// Byte offset of `sub` within `src`. Both must come from the same allocation, which holds
+/// for token texts because they are always slices of the tokenizer's input.
+fn offset_in(src: &str, sub: &str) -> usize {
+    sub.as_ptr() as usize - src.as_ptr() as usize
+}
+
+/// Checks that the tokens tile the source: every byte is either inside a token or is
+/// whitespace between two of them.
+///
+/// This is the guarantee the formatter rests on. Output is assembled only from token texts
+/// and chosen whitespace, so if the tokens account for all the non-whitespace input, then no
+/// character can be lost no matter what any formatter does. A lexer rule that skipped a
+/// character it did not recognise would leave a non-whitespace gap here and be caught, rather
+/// than silently deleting part of someone's SQL.
+fn tokens_tile(src: &str, tokens: &[Token]) -> bool {
+    let mut cursor = 0;
+    for tok in tokens {
+        let start = offset_in(src, tok.text);
+        if start < cursor || !src[cursor..start].chars().all(char::is_whitespace) {
+            return false;
+        }
+        cursor = start + tok.text.len();
+    }
+    src[cursor..].chars().all(char::is_whitespace)
+}
+
+struct Statement<'a> {
+    tokens: &'a [Token<'a>],
     line: usize,
 }
 
-fn split_statements(tokens: &[Token], token_lines: &[usize]) -> Vec<Statement> {
+/// Splits the token stream into statements at top-level semicolons. Statements are slices of
+/// the original stream, so no token is copied or rebuilt along the way.
+fn split_statements<'a>(tokens: &'a [Token<'a>]) -> Vec<Statement<'a>> {
     let mut statements = Vec::new();
-    let mut current = Vec::new();
+    let mut begin = 0;
     let mut start_line = 1;
     // A statement can open with comments; report the line of the SQL itself, not the comment.
     let mut start_is_comment = false;
@@ -460,46 +527,43 @@ fn split_statements(tokens: &[Token], token_lines: &[usize]) -> Vec<Statement> {
     let mut body_depth = 0isize;
 
     for (idx, tok) in tokens.iter().enumerate() {
-        let line = token_lines.get(idx).copied().unwrap_or(1);
-        let is_comment = matches!(tok, Token::Comment(_));
-        if current.is_empty() {
-            start_line = line;
-            start_is_comment = is_comment;
-        } else if start_is_comment && !is_comment {
-            start_line = line;
+        if idx == begin {
+            start_line = tok.line;
+            start_is_comment = tok.is(Kind::Comment);
+        } else if start_is_comment && !tok.is(Kind::Comment) {
+            start_line = tok.line;
             start_is_comment = false;
         }
 
-        if let Token::Word(w) = tok {
+        if tok.is(Kind::Word) {
             if words_seen < 3 {
                 words_seen += 1;
                 if words_seen == 1 {
-                    starts_with_create = w.eq_ignore_ascii_case("CREATE");
-                } else if starts_with_create && w.eq_ignore_ascii_case("TRIGGER") {
+                    starts_with_create = tok.text.eq_ignore_ascii_case("CREATE");
+                } else if starts_with_create && tok.text.eq_ignore_ascii_case("TRIGGER") {
                     is_trigger = true;
                 }
             }
             if is_trigger {
-                body_depth = (body_depth + block_depth_delta(w)).max(0);
+                body_depth = (body_depth + block_depth_delta(tok.text)).max(0);
             }
         }
 
-        let is_semi = matches!(tok, Token::Semicolon);
-        current.push(tok.clone());
-        if is_semi && body_depth == 0 {
+        if tok.is(Kind::Semicolon) && body_depth == 0 {
             statements.push(Statement {
-                tokens: std::mem::take(&mut current),
+                tokens: &tokens[begin..=idx],
                 line: start_line,
             });
+            begin = idx + 1;
             words_seen = 0;
             starts_with_create = false;
             is_trigger = false;
         }
     }
 
-    if !current.is_empty() {
+    if begin < tokens.len() {
         statements.push(Statement {
-            tokens: current,
+            tokens: &tokens[begin..],
             line: start_line,
         });
     }
@@ -507,197 +571,129 @@ fn split_statements(tokens: &[Token], token_lines: &[usize]) -> Vec<Statement> {
     statements
 }
 
-fn token_upper_string(tok: &Token) -> String {
-    match tok {
-        Token::Word(w) => {
-            if is_keyword(w) { w.to_uppercase() } else { w.clone() }
-        }
-        Token::Comment(c) => c.clone(),
-        Token::OpenParen => "(".into(),
-        Token::CloseParen => ")".into(),
-        Token::Comma => ",".into(),
-        Token::Semicolon => ";".into(),
-        Token::Equals => "=".into(),
-        Token::Dot => ".".into(),
-        Token::Star => "*".into(),
-        Token::GreaterThan => ">".into(),
-        Token::LessThan => "<".into(),
-        Token::GreaterOrEqual => ">=".into(),
-        Token::LessOrEqual => "<=".into(),
-        Token::NotEquals(s) => (*s).into(),
-        Token::Concat => "||".into(),
-        Token::DoubleColon => "::".into(),
-        Token::Operator(c) | Token::Symbol(c) => c.to_string(),
+/// Whether a space is required between two adjacent tokens. This, plus line breaks and
+/// indentation chosen by the formatters, is the entire extent of what formatting may add.
+fn needs_space(prev: &Token, tok: &Token) -> bool {
+    use Kind::*;
+
+    // A block comment is glued to neither side, so it needs separating from real tokens.
+    if prev.kind == Comment {
+        return !prev.is_line_comment() && matches!(tok.kind, Word | Operator);
+    }
+
+    match (prev.kind, tok.kind) {
+        (Word, Word) => true,
+        (Word, Equals) | (Equals, Word) | (Equals, OpenParen) => true,
+        (CloseParen, Word) | (Comma, Word) => true,
+        (Word, Star) | (Star, Word) => true,
+        // Keep a comment off the token it trails.
+        (Word | Star | CloseParen | Comma, Comment) => true,
+        // Binary operators are spaced on both sides.
+        (Word, GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator) => true,
+        (GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator, Word) => true,
+        (CloseParen, Operator) => true,
+        // A closing bracket separates from what follows, like a closing paren does.
+        (Symbol, Word) if prev.text == "]" => true,
+        // Detach a symbol from a preceding word (`SET @x`), but never split a bracketed
+        // subscript like `a[1]`. Nothing is glued to what follows, so prefixes such as
+        // `@x` and `:=` stay intact.
+        (Word, Symbol) if !matches!(tok.text, "[" | "]" | "{" | "}") => true,
+        _ => false,
     }
 }
 
+/// Renders tokens with single spaces where the spacing rules call for them.
 fn tokens_upper_string(tokens: &[Token]) -> String {
     let mut s = String::new();
     let mut prev: Option<&Token> = None;
-    for tok in tokens {
-        match tok {
-            Token::Comment(c) => {
-                if matches!(prev, Some(Token::Word(_)))
-                    || matches!(prev, Some(Token::Star))
-                    || matches!(prev, Some(Token::CloseParen))
-                    || matches!(prev, Some(Token::Comma))
-                {
-                    s.push(' ');
-                }
-                s.push_str(c);
-                if c.starts_with("--") || c.starts_with('#') {
-                    s.push('\n');
-                    prev = None;
-                } else {
-                    prev = Some(tok);
-                }
-                continue;
-            }
-            _ => {}
-        }
-        let need_space = match (prev, tok) {
-            (Some(Token::Word(_)), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Equals) => true,
-            (Some(Token::Equals), Token::Word(_)) => true,
-            (Some(Token::Equals), Token::OpenParen) => true,
-            (Some(Token::CloseParen), Token::Word(_)) => true,
-            (Some(Token::Comma), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Star) => true,
-            (Some(Token::Star), Token::Word(_)) => true,
-            (Some(Token::Star), Token::Comment(_)) => true,
-            (Some(Token::Comment(c)), Token::Word(_)) if !c.starts_with("--") && !c.starts_with('#') => true,
-            // Operators need spaces around them
-            (Some(Token::Word(_)), Token::GreaterThan) => true,
-            (Some(Token::GreaterThan), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::LessThan) => true,
-            (Some(Token::LessThan), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::GreaterOrEqual) => true,
-            (Some(Token::GreaterOrEqual), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::LessOrEqual) => true,
-            (Some(Token::LessOrEqual), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::NotEquals(_)) => true,
-            (Some(Token::NotEquals(_)), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Concat) => true,
-            (Some(Token::Concat), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Operator(_)) => true,
-            (Some(Token::Operator(_)), Token::Word(_)) => true,
-            (Some(Token::CloseParen), Token::Operator(_)) => true,
-            (Some(Token::Comment(c)), Token::Operator(_)) if !c.starts_with("--") && !c.starts_with('#') => true,
-            // A closing bracket separates from what follows, like a closing paren does.
-            (Some(Token::Symbol(']')), Token::Word(_)) => true,
-            // Detach a symbol from a preceding word (`SET @x`), but never split a
-            // bracketed subscript like `a[1]`. Nothing is glued to what follows, so
-            // prefixes such as `@x` and `:=` stay intact.
-            (Some(Token::Word(_)), Token::Symbol(c)) if !matches!(c, '[' | ']' | '{' | '}') => true,
-            _ => false,
-        };
-        if need_space {
-            s.push(' ');
-        }
-        s.push_str(&token_upper_string(tok));
-        prev = Some(tok);
-    }
-    s
-}
 
-fn tokens_upper_string_nospace(tokens: &[Token]) -> String {
-    let mut s = String::new();
     for tok in tokens {
-        let t = token_upper_string(tok);
-        if let Token::Comment(c) = tok {
-            if c.starts_with("--") || c.starts_with('#') {
-                s.push('\n');
-            } else {
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
                 s.push(' ');
             }
         }
-        s.push_str(&t);
+        s.push_str(&tok.emit());
+
+        // Whatever follows a line comment has to start on the next line.
+        if tok.is_line_comment() {
+            s.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
+        }
+    }
+
+    s
+}
+
+/// Renders tokens with no spacing between them, for INSERT value tuples.
+fn tokens_upper_string_nospace(tokens: &[Token]) -> String {
+    let mut s = String::new();
+    for tok in tokens {
+        if tok.kind == Kind::Comment {
+            s.push(if tok.is_line_comment() { '\n' } else { ' ' });
+        }
+        s.push_str(&tok.emit());
     }
     s
 }
 
-fn is_create_table(tokens: &[Token]) -> bool {
-    let words: Vec<&Token> = tokens.iter().filter(|t| !matches!(t, Token::Comment(_))).collect();
-    if words.len() >= 2 {
-        if let (Token::Word(a), Token::Word(b)) = (&words[0], &words[1]) {
-            return a.to_uppercase() == "CREATE" && b.to_uppercase() == "TABLE";
-        }
-    }
-    false
+/// The `n`th token that is not a comment, since comments may precede or interrupt a statement.
+fn nth_code_token<'a, 'b>(tokens: &'b [Token<'a>], n: usize) -> Option<&'b Token<'a>> {
+    tokens.iter().filter(|t| !t.is(Kind::Comment)).nth(n)
 }
 
+/// Whether the statement's leading words are exactly `words`.
+fn starts_with_words(tokens: &[Token], words: &[&str]) -> bool {
+    words
+        .iter()
+        .enumerate()
+        .all(|(i, w)| nth_code_token(tokens, i).is_some_and(|t| t.is_word(w)))
+}
+
+fn is_create_table(tokens: &[Token]) -> bool {
+    starts_with_words(tokens, &["CREATE", "TABLE"])
+}
+
+/// Returns the index of the view's `SELECT`, which is where its body starts.
 fn is_create_view(tokens: &[Token]) -> Option<usize> {
-    let words: Vec<(usize, &Token)> = tokens.iter().enumerate().filter(|(_, t)| !matches!(t, Token::Comment(_))).collect();
-    if words.len() >= 3 {
-        if let (Token::Word(a), Token::Word(b)) = (&words[0].1, &words[1].1) {
-            if a.to_uppercase() == "CREATE"
-                && (b.to_uppercase() == "VIEW" || b.to_uppercase() == "OR")
-            {
-                for (idx, tok) in words.iter().skip(2) {
-                    if let Token::Word(w) = tok {
-                        if w.to_uppercase() == "SELECT" {
-                            return Some(*idx);
-                        }
-                    }
-                }
-            }
-        }
+    if !starts_with_words(tokens, &["CREATE"]) {
+        return None;
     }
-    None
+    let second = nth_code_token(tokens, 1)?;
+    if !second.is_word("VIEW") && !second.is_word("OR") {
+        return None;
+    }
+
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| !t.is(Kind::Comment))
+        .skip(2)
+        .find(|(_, t)| t.is_word("SELECT"))
+        .map(|(idx, _)| idx)
 }
 
 fn is_insert(tokens: &[Token]) -> bool {
-    for tok in tokens {
-        if let Token::Comment(_) = tok {
-            continue;
-        }
-        if let Token::Word(a) = tok {
-            return a.to_uppercase() == "INSERT";
-        }
-        return false;
-    }
-    false
+    starts_with_words(tokens, &["INSERT"])
 }
 
 fn is_drop(tokens: &[Token]) -> bool {
-    for tok in tokens {
-        if let Token::Comment(_) = tok {
-            continue;
-        }
-        if let Token::Word(a) = tok {
-            return a.to_uppercase() == "DROP";
-        }
-        return false;
-    }
-    false
+    starts_with_words(tokens, &["DROP"])
 }
 
 fn is_create_index(tokens: &[Token]) -> bool {
-    let words: Vec<&Token> = tokens.iter().filter(|t| !matches!(t, Token::Comment(_))).collect();
-    if words.len() >= 3 {
-        if let (Token::Word(a), Token::Word(b)) = (&words[0], &words[1]) {
-            if a.to_uppercase() == "CREATE" {
-                return b.to_uppercase() == "INDEX" || b.to_uppercase() == "UNIQUE";
-            }
-        }
-    }
-    false
+    starts_with_words(tokens, &["CREATE"])
+        && nth_code_token(tokens, 1).is_some_and(|t| t.is_word("INDEX") || t.is_word("UNIQUE"))
 }
 
 /// Matches `CREATE [TEMP|TEMPORARY] TRIGGER ...`.
 fn is_create_trigger(tokens: &[Token]) -> bool {
-    let words: Vec<&String> = tokens
-        .iter()
-        .filter_map(|t| match t {
-            Token::Word(w) => Some(w),
-            _ => None,
-        })
-        .take(3)
-        .collect();
-
-    words.len() >= 2
-        && words[0].eq_ignore_ascii_case("CREATE")
-        && words[1..].iter().any(|w| w.eq_ignore_ascii_case("TRIGGER"))
+    if !starts_with_words(tokens, &["CREATE"]) {
+        return false;
+    }
+    (1..3).any(|i| nth_code_token(tokens, i).is_some_and(|t| t.is_word("TRIGGER")))
 }
 
 /// `BEGIN` and `CASE` open a block that `END` closes. Used to tell a trigger's body
@@ -713,56 +709,50 @@ fn block_depth_delta(word: &str) -> isize {
 }
 
 #[derive(Debug)]
-struct ColumnDef {
-    name_tokens: Vec<Token>,
-    type_tokens: Vec<Token>,
-    constraint_tokens: Vec<Token>,
+struct ColumnDef<'a> {
+    name_tokens: &'a [Token<'a>],
+    type_tokens: &'a [Token<'a>],
+    constraint_tokens: &'a [Token<'a>],
 }
 
-fn parse_column_defs(inner_tokens: &[Token]) -> (Vec<ColumnDef>, Vec<Vec<Token>>) {
-    let mut columns = Vec::new();
-    let mut table_constraints = Vec::new();
-    let mut current = Vec::new();
+/// Splits a slice at top-level commas, keeping each piece as a slice of the original.
+fn split_top_level_commas<'a>(tokens: &'a [Token<'a>]) -> Vec<&'a [Token<'a>]> {
+    let mut pieces = Vec::new();
+    let mut begin = 0;
     let mut depth = 0;
 
-    for tok in inner_tokens {
-        match tok {
-            Token::OpenParen => {
-                depth += 1;
-                current.push(tok.clone());
+    for (idx, tok) in tokens.iter().enumerate() {
+        match tok.kind {
+            Kind::OpenParen => depth += 1,
+            Kind::CloseParen => depth -= 1,
+            Kind::Comma if depth == 0 => {
+                pieces.push(&tokens[begin..idx]);
+                begin = idx + 1;
             }
-            Token::CloseParen => {
-                depth -= 1;
-                current.push(tok.clone());
-            }
-            Token::Comma if depth == 0 => {
-                table_constraints.push(std::mem::take(&mut current));
-            }
-            _ => {
-                current.push(tok.clone());
-            }
+            _ => {}
         }
     }
-    if !current.is_empty() {
-        table_constraints.push(current);
+    if begin < tokens.len() {
+        pieces.push(&tokens[begin..]);
     }
 
-    let mut actual_table_constraints = Vec::new();
+    pieces
+}
 
-    for item in table_constraints {
-        if item.is_empty() {
+fn parse_column_defs<'a>(inner_tokens: &'a [Token<'a>]) -> (Vec<ColumnDef<'a>>, Vec<&'a [Token<'a>]>) {
+    let mut columns = Vec::new();
+    let mut table_constraints = Vec::new();
+
+    for item in split_top_level_commas(inner_tokens) {
+        let Some(first) = item.first() else { continue };
+
+        if first.is(Kind::Word) && is_table_constraint_start(first.text) {
+            table_constraints.push(item);
             continue;
         }
 
-        if let Token::Word(first) = &item[0] {
-            if is_table_constraint_start(&first) {
-                actual_table_constraints.push(item);
-                continue;
-            }
-        }
-
-        let (name_tokens, rest) = split_first_word(&item);
-        let (type_tokens, constraint_tokens) = split_type_and_constraints(&rest);
+        let (name_tokens, rest) = split_first_word(item);
+        let (type_tokens, constraint_tokens) = split_type_and_constraints(rest);
 
         columns.push(ColumnDef {
             name_tokens,
@@ -771,41 +761,37 @@ fn parse_column_defs(inner_tokens: &[Token]) -> (Vec<ColumnDef>, Vec<Vec<Token>>
         });
     }
 
-    (columns, actual_table_constraints)
+    (columns, table_constraints)
 }
 
-fn split_first_word(tokens: &[Token]) -> (Vec<Token>, Vec<Token>) {
-    if tokens.is_empty() {
-        return (vec![], vec![]);
-    }
-    // Skip leading comments
-    for i in 0..tokens.len() {
-        if let Token::Comment(_) = &tokens[i] {
+/// Splits off the leading identifier (the column name) from the rest of its definition.
+fn split_first_word<'a>(tokens: &'a [Token<'a>]) -> (&'a [Token<'a>], &'a [Token<'a>]) {
+    for (i, tok) in tokens.iter().enumerate() {
+        if tok.is(Kind::Comment) {
             continue;
         }
-        if let Token::Word(_) = &tokens[i] {
-            return (tokens[..=i].to_vec(), tokens[i + 1..].to_vec());
+        return if tok.is(Kind::Word) {
+            (&tokens[..=i], &tokens[i + 1..])
         } else {
-            return (vec![], tokens[i..].to_vec());
-        }
+            (&[], &tokens[i..])
+        };
     }
-    (vec![], vec![])
+    (&[], &[])
 }
 
-fn split_type_and_constraints(tokens: &[Token]) -> (Vec<Token>, Vec<Token>) {
-    for i in 0..tokens.len() {
-        if let Token::Word(w) = &tokens[i] {
-            if is_constraint_start(w) {
-                return (tokens[..i].to_vec(), tokens[i..].to_vec());
-            }
+/// Splits a column's type from the constraints that follow it.
+fn split_type_and_constraints<'a>(tokens: &'a [Token<'a>]) -> (&'a [Token<'a>], &'a [Token<'a>]) {
+    for (i, tok) in tokens.iter().enumerate() {
+        if tok.is(Kind::Word) && is_constraint_start(tok.text) {
+            return (&tokens[..i], &tokens[i..]);
         }
     }
-    (tokens.to_vec(), vec![])
+    (tokens, &[])
 }
 
 fn format_create_table(tokens: &[Token]) -> Result<String, String> {
     // Find opening paren position
-    let open_paren_pos = tokens.iter().position(|t| matches!(t, Token::OpenParen));
+    let open_paren_pos = tokens.iter().position(|t| t.is(Kind::OpenParen));
 
     // No column list: CREATE TABLE ... AS SELECT / LIKE, or a definition still being typed.
     // Emitting the column-list layout here would append a `(` that is not in the source.
@@ -826,9 +812,9 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
         let mut depth = 0;
         let mut close_pos = None;
         for (i, tok) in tokens.iter().enumerate().skip(paren_pos) {
-            match tok {
-                Token::OpenParen => depth += 1,
-                Token::CloseParen => {
+            match tok.kind {
+                Kind::OpenParen => depth += 1,
+                Kind::CloseParen => {
                     depth -= 1;
                     if depth == 0 {
                         close_pos = Some(i);
@@ -852,20 +838,20 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
         if !col_defs.is_empty() {
             let max_name_width = col_defs
                 .iter()
-                .map(|c| tokens_display_width(&c.name_tokens))
+                .map(|c| tokens_display_width(c.name_tokens))
                 .max()
                 .unwrap_or(0);
 
             let max_type_width = col_defs
                 .iter()
-                .map(|c| tokens_display_width(&c.type_tokens))
+                .map(|c| tokens_display_width(c.type_tokens))
                 .max()
                 .unwrap_or(0);
 
             for (idx, col) in col_defs.iter().enumerate() {
-                let name_str = tokens_upper_string(&col.name_tokens);
-                let type_str = tokens_upper_string(&col.type_tokens);
-                let constraint_str = tokens_upper_string(&col.constraint_tokens);
+                let name_str = tokens_upper_string(col.name_tokens);
+                let type_str = tokens_upper_string(col.type_tokens);
+                let constraint_str = tokens_upper_string(col.constraint_tokens);
 
                 let name_padded = format!("{:width$}", name_str, width = max_name_width);
                 let type_padded = format!("{:width$}", type_str, width = max_type_width);
@@ -896,7 +882,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
         }
 
         let mut trailing_tokens = &tokens[close_pos + 1..];
-        let has_trailing_semi = matches!(trailing_tokens.last(), Some(Token::Semicolon));
+        let has_trailing_semi = trailing_tokens.last().is_some_and(|t| t.is(Kind::Semicolon));
         if has_trailing_semi {
             trailing_tokens = &trailing_tokens[..trailing_tokens.len() - 1];
         }
@@ -909,7 +895,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
     }
 
     // Semicolon
-    if matches!(tokens.last(), Some(Token::Semicolon)) {
+    if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) {
         result.push(';');
     }
 
@@ -918,7 +904,8 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
 
 fn format_insert(tokens: &[Token]) -> Result<String, String> {
     let values_pos = tokens.iter().position(|t| {
-        if let Token::Word(w) = t {
+        if t.is(Kind::Word) {
+            let w = t.text;
             w.to_uppercase() == "VALUES"
         } else {
             false
@@ -939,7 +926,7 @@ fn format_insert(tokens: &[Token]) -> Result<String, String> {
     // Parse value tuples, plus any clause that follows them (ON CONFLICT, RETURNING, ...)
     let (tuples, tail) = parse_value_tuples(values_tokens)?;
 
-    let semicolon = if matches!(tokens.last(), Some(Token::Semicolon)) {
+    let semicolon = if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) {
         ";"
     } else {
         ""
@@ -948,7 +935,7 @@ fn format_insert(tokens: &[Token]) -> Result<String, String> {
     let tail_str = if tail.is_empty() {
         String::new()
     } else {
-        format!(" {}", tokens_upper_string(&tail))
+        format!(" {}", tokens_upper_string(tail))
     };
 
     let compact = {
@@ -990,68 +977,62 @@ fn format_insert(tokens: &[Token]) -> Result<String, String> {
 /// Tuples are rendered without spaces between their tokens, so anything that is not really a
 /// value tuple must never be folded into one — and dropping it would lose SQL outright. When
 /// the token stream is not a value list, this fails instead of guessing.
-fn parse_value_tuples(tokens: &[Token]) -> Result<(Vec<Vec<Token>>, Vec<Token>), String> {
+fn parse_value_tuples<'a>(
+    tokens: &'a [Token<'a>],
+) -> Result<(Vec<&'a [Token<'a>]>, &'a [Token<'a>]), String> {
     let mut tuples = Vec::new();
-    let mut current = Vec::new();
     let mut depth = 0;
-    let mut in_tuple = false;
+    // Index just past the opening paren while inside a tuple.
+    let mut tuple_start: Option<usize> = None;
     // Set by a comma that closed a tuple: the value list promises another tuple next.
     let mut expect_tuple = false;
 
     for (idx, tok) in tokens.iter().enumerate() {
-        match tok {
-            Token::OpenParen if !in_tuple => {
-                in_tuple = true;
+        match tok.kind {
+            Kind::OpenParen if tuple_start.is_none() => {
+                tuple_start = Some(idx + 1);
                 expect_tuple = false;
             }
-            Token::OpenParen => {
-                depth += 1;
-                current.push(tok.clone());
+            Kind::OpenParen => depth += 1,
+            Kind::CloseParen if tuple_start.is_some() && depth == 0 => {
+                let begin = tuple_start.take().unwrap_or(idx);
+                tuples.push(&tokens[begin..idx]);
             }
-            Token::CloseParen if in_tuple && depth == 0 => {
-                tuples.push(std::mem::take(&mut current));
-                in_tuple = false;
-            }
-            Token::CloseParen if in_tuple => {
-                depth -= 1;
-                current.push(tok.clone());
-            }
-            _ if in_tuple => {
-                current.push(tok.clone());
-            }
-            Token::Comma => {
-                expect_tuple = true;
-            }
-            Token::Semicolon => {}
-            other => {
+            Kind::CloseParen if tuple_start.is_some() => depth -= 1,
+            _ if tuple_start.is_some() => {}
+            Kind::Comma => expect_tuple = true,
+            Kind::Semicolon => {}
+            _ => {
                 // A keyword directly after a closed tuple opens a trailing clause. After a
                 // comma, or before any tuple at all, a value tuple was promised instead — so
                 // this is a statement that ran into the INSERT, not a clause.
-                if expect_tuple || tuples.is_empty() || !matches!(other, Token::Word(_)) {
+                if expect_tuple || tuples.is_empty() || !tok.is(Kind::Word) {
                     return Err(format!(
                         "this INSERT runs into `{}` between its VALUES tuples \
                          (is it missing its `;`, or a value list?)",
-                        token_upper_string(other)
+                        tok.emit()
                     ));
                 }
                 // The statement's own `;` is re-emitted by the caller.
                 let mut tail = &tokens[idx..];
-                if let Some((Token::Semicolon, rest)) = tail.split_last() {
-                    tail = rest;
+                if let Some((last, rest)) = tail.split_last() {
+                    if last.is(Kind::Semicolon) {
+                        tail = rest;
+                    }
                 }
-                return Ok((tuples, tail.to_vec()));
+                return Ok((tuples, tail));
             }
         }
     }
 
-    if in_tuple {
+    if tuple_start.is_some() {
         return Err("this INSERT has an unterminated VALUES tuple: missing `)`".to_string());
     }
     if expect_tuple {
         return Err("this INSERT ends on a trailing `,`: a VALUES tuple is missing".to_string());
     }
 
-    Ok((tuples, Vec::new()))
+    Ok((tuples, &[]))
 }
 
 fn format_create_index(tokens: &[Token]) -> String {
@@ -1063,7 +1044,7 @@ fn format_create_index(tokens: &[Token]) -> String {
 fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
     let begin_idx = tokens
         .iter()
-        .position(|t| matches!(t, Token::Word(w) if w.eq_ignore_ascii_case("BEGIN")));
+        .position(|t| t.is_word("BEGIN"));
 
     // No body block to lay out (or one not yet typed): keep every token as-is.
     let Some(begin_idx) = begin_idx else {
@@ -1073,7 +1054,8 @@ fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
     let mut depth = 1isize;
     let mut end_idx = None;
     for (i, tok) in tokens.iter().enumerate().skip(begin_idx + 1) {
-        if let Token::Word(w) = tok {
+        if tok.is(Kind::Word) {
+            let w = tok.text;
             depth += block_depth_delta(w);
             if depth == 0 {
                 end_idx = Some(i);
@@ -1090,7 +1072,7 @@ fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
     result.push('\n');
 
     for stmt in split_trigger_body(&tokens[begin_idx + 1..end_idx]) {
-        let formatted = format_statement(&stmt)?;
+        let formatted = format_statement(stmt)?;
         for line in formatted.lines() {
             if line.is_empty() {
                 result.push('\n');
@@ -1107,14 +1089,14 @@ fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
     let trailing = tokens_upper_string(
         tokens[end_idx + 1..]
             .split_last()
-            .filter(|(last, _)| matches!(last, Token::Semicolon))
+            .filter(|(last, _)| last.is(Kind::Semicolon))
             .map_or(&tokens[end_idx + 1..], |(_, rest)| rest),
     );
     if !trailing.is_empty() {
         result.push(' ');
         result.push_str(&trailing);
     }
-    if matches!(tokens.last(), Some(Token::Semicolon)) {
+    if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) {
         result.push(';');
     }
 
@@ -1122,23 +1104,23 @@ fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
 }
 
 /// Splits a trigger body into its statements, keeping each terminating `;` attached.
-fn split_trigger_body(tokens: &[Token]) -> Vec<Vec<Token>> {
+fn split_trigger_body<'a>(tokens: &'a [Token<'a>]) -> Vec<&'a [Token<'a>]> {
     let mut statements = Vec::new();
-    let mut current = Vec::new();
+    let mut begin = 0;
     let mut depth = 0isize;
 
-    for tok in tokens {
-        if let Token::Word(w) = tok {
-            depth = (depth + block_depth_delta(w)).max(0);
+    for (idx, tok) in tokens.iter().enumerate() {
+        if tok.is(Kind::Word) {
+            depth = (depth + block_depth_delta(tok.text)).max(0);
         }
-        current.push(tok.clone());
-        if matches!(tok, Token::Semicolon) && depth == 0 {
-            statements.push(std::mem::take(&mut current));
+        if tok.is(Kind::Semicolon) && depth == 0 {
+            statements.push(&tokens[begin..=idx]);
+            begin = idx + 1;
         }
     }
 
-    if !current.is_empty() {
-        statements.push(current);
+    if begin < tokens.len() {
+        statements.push(&tokens[begin..]);
     }
 
     statements
@@ -1151,11 +1133,12 @@ fn format_drop(tokens: &[Token]) -> String {
 fn find_as_position(tokens: &[Token]) -> Option<usize> {
     let mut depth = 0;
     for (i, tok) in tokens.iter().enumerate() {
-        match tok {
-            Token::OpenParen => depth += 1,
-            Token::CloseParen => depth -= 1,
-            Token::Word(w) if depth == 0 && w.to_uppercase() == "AS" => return Some(i),
-            _ => {}
+        if tok.is(Kind::OpenParen) {
+            depth += 1;
+        } else if tok.is(Kind::CloseParen) {
+            depth -= 1;
+        } else if depth == 0 && tok.is_word("AS") {
+            return Some(i);
         }
     }
     None
@@ -1166,7 +1149,7 @@ fn find_as_position(tokens: &[Token]) -> Option<usize> {
 fn is_simple_expression(tokens: &[Token]) -> bool {
     tokens
         .iter()
-        .all(|t| matches!(t, Token::Word(_) | Token::Dot))
+        .all(|t| t.is(Kind::Word) || t.is(Kind::Dot))
 }
 
 fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
@@ -1177,7 +1160,8 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
 
     // Parse SELECT columns until FROM
     let from_pos = select_tokens.iter().position(|t| {
-        if let Token::Word(w) = t {
+        if t.is(Kind::Word) {
+            let w = t.text;
             w.to_uppercase() == "FROM"
         } else {
             false
@@ -1217,7 +1201,7 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
 
     for (idx, col_tokens) in columns.iter().enumerate() {
         let last = idx == columns.len() - 1;
-        let has_concat = col_tokens.iter().any(|t| matches!(t, Token::Concat));
+        let has_concat = col_tokens.iter().any(|t| t.is(Kind::Concat));
 
         let col_str = if has_concat {
             // Concat columns use their own multi-line formatting
@@ -1250,7 +1234,7 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
     result.push_str(&rest_formatted);
 
     // Ensure semicolon
-    if matches!(tokens.last(), Some(Token::Semicolon)) && !result.ends_with(';') {
+    if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) && !result.ends_with(';') {
         result.push(';');
     }
 
@@ -1259,7 +1243,7 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
 
 fn format_view_column(tokens: &[Token]) -> String {
     // Check if this column expression contains || operators
-    let has_concat = tokens.iter().any(|t| matches!(t, Token::Concat));
+    let has_concat = tokens.iter().any(|t| t.is(Kind::Concat));
     if !has_concat {
         return tokens_upper_string(tokens);
     }
@@ -1268,12 +1252,12 @@ fn format_view_column(tokens: &[Token]) -> String {
     let mut segments = Vec::new();
     let mut current = Vec::new();
     for tok in tokens {
-        if matches!(tok, Token::Concat) {
+        if tok.is(Kind::Concat) {
             if !current.is_empty() {
                 segments.push(std::mem::take(&mut current));
             }
         } else {
-            current.push(tok.clone());
+            current.push(*tok);
         }
     }
     if !current.is_empty() {
@@ -1308,7 +1292,8 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
     let mut i = 0;
 
     while i < tokens.len() {
-        if let Token::Word(w) = &tokens[i] {
+        if tokens[i].is(Kind::Word) {
+            let w = tokens[i].text;
             let upper = w.to_uppercase();
             if upper == "FROM" {
                 result.push_str("FROM");
@@ -1316,7 +1301,8 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                 // Collect table reference
                 let start = i;
                 while i < tokens.len() {
-                    if let Token::Word(w) = &tokens[i] {
+                    if tokens[i].is(Kind::Word) {
+                        let w = tokens[i].text;
                         let wu = w.to_uppercase();
                         if wu == "JOIN" || wu == "LEFT" || wu == "RIGHT" || wu == "INNER"
                             || wu == "CROSS" || wu == "NATURAL" || wu == "WHERE"
@@ -1325,7 +1311,7 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                             break;
                         }
                     }
-                    if matches!(&tokens[i], Token::Semicolon) {
+                    if tokens[i].is(Kind::Semicolon) {
                         break;
                     }
                     i += 1;
@@ -1341,26 +1327,29 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                 let start = i;
                 // Collect up to ON (or next JOIN)
                 while i < tokens.len() {
-                    if let Token::Word(w) = &tokens[i] {
+                    if tokens[i].is(Kind::Word) {
+                        let w = tokens[i].text;
                         if w.to_uppercase() == "ON" {
                             break;
                         }
                     }
-                    if matches!(&tokens[i], Token::Semicolon) {
+                    if tokens[i].is(Kind::Semicolon) {
                         break;
                     }
                     i += 1;
                 }
                 let join_part = tokens_upper_string(&tokens[start..i]);
                 result.push_str(&join_part);
-                if i < tokens.len() {
-                    if let Token::Word(w) = &tokens[i] {
+                if i < tokens.len()
+                    && tokens[i].is(Kind::Word) {
+                        let w = tokens[i].text;
                         if w.to_uppercase() == "ON" {
                             result.push('\n');
                             result.push_str("        ");
                             let on_start = i;
                             while i < tokens.len() {
-                                if let Token::Word(w) = &tokens[i] {
+                                if tokens[i].is(Kind::Word) {
+                                    let w = tokens[i].text;
                                     let wu = w.to_uppercase();
                                     if wu == "JOIN" || wu == "LEFT" || wu == "RIGHT"
                                         || wu == "INNER" || wu == "CROSS" || wu == "NATURAL"
@@ -1369,7 +1358,7 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                                         break;
                                     }
                                 }
-                                if matches!(&tokens[i], Token::Semicolon) {
+                                if tokens[i].is(Kind::Semicolon) {
                                     break;
                                 }
                                 i += 1;
@@ -1379,23 +1368,22 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                             continue;
                         }
                     }
-                }
             } else if upper == "WHERE" || upper == "GROUP" || upper == "ORDER" || upper == "HAVING" {
                 result.push('\n');
                 let start = i;
-                while i < tokens.len() && !matches!(&tokens[i], Token::Semicolon) {
+                while i < tokens.len() && !tokens[i].is(Kind::Semicolon) {
                     i += 1;
                 }
                 result.push_str(&tokens_upper_string(&tokens[start..i]));
                 continue;
             } else {
-                result.push_str(&token_upper_string(&tokens[i]));
+                result.push_str(&tokens[i].emit());
                 i += 1;
             }
-        } else if matches!(&tokens[i], Token::Semicolon) {
+        } else if tokens[i].is(Kind::Semicolon) {
             break;
         } else {
-            result.push_str(&token_upper_string(&tokens[i]));
+            result.push_str(&tokens[i].emit());
             i += 1;
         }
     }
@@ -1403,42 +1391,17 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
     result
 }
 
-fn parse_select_columns(tokens: &[Token]) -> Vec<Vec<Token>> {
-    let mut columns = Vec::new();
-    let mut current = Vec::new();
-    let mut depth = 0;
-
-    for tok in tokens {
-        match tok {
-            Token::OpenParen => {
-                depth += 1;
-                current.push(tok.clone());
-            }
-            Token::CloseParen => {
-                depth -= 1;
-                current.push(tok.clone());
-            }
-            Token::Comma if depth == 0 => {
-                columns.push(std::mem::take(&mut current));
-            }
-            _ => {
-                current.push(tok.clone());
-            }
-        }
-    }
-    if !current.is_empty() {
-        columns.push(current);
-    }
-
-    columns
+/// Splits a SELECT list into its columns at top-level commas.
+fn parse_select_columns<'a>(tokens: &'a [Token<'a>]) -> Vec<&'a [Token<'a>]> {
+    split_top_level_commas(tokens)
 }
 
 fn find_matching_paren(tokens: &[Token], open_idx: usize) -> Option<usize> {
     let mut depth = 0;
-    for i in open_idx..tokens.len() {
-        match &tokens[i] {
-            Token::OpenParen => depth += 1,
-            Token::CloseParen => {
+    for (i, tok) in tokens.iter().enumerate().skip(open_idx) {
+        match tok.kind {
+            Kind::OpenParen => depth += 1,
+            Kind::CloseParen => {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
@@ -1451,18 +1414,19 @@ fn find_matching_paren(tokens: &[Token], open_idx: usize) -> Option<usize> {
 }
 
 fn is_subquery_start(tokens: &[Token], idx: usize) -> bool {
-    matches!(&tokens[idx], Token::OpenParen)
+    tokens[idx].is(Kind::OpenParen)
         && idx + 1 < tokens.len()
-        && matches!(&tokens[idx + 1], Token::Word(w) if w.to_uppercase() == "SELECT")
+        && tokens[idx + 1].is_word("SELECT")
         && find_matching_paren(tokens, idx).is_some()
 }
 
 fn is_update(tokens: &[Token]) -> bool {
     for tok in tokens {
-        if let Token::Comment(_) = tok {
+        if tok.is(Kind::Comment) {
             continue;
         }
-        if let Token::Word(w) = tok {
+        if tok.is(Kind::Word) {
+            let w = tok.text;
             return w.to_uppercase() == "UPDATE";
         }
         return false;
@@ -1472,10 +1436,11 @@ fn is_update(tokens: &[Token]) -> bool {
 
 fn is_delete(tokens: &[Token]) -> bool {
     for tok in tokens {
-        if let Token::Comment(_) = tok {
+        if tok.is(Kind::Comment) {
             continue;
         }
-        if let Token::Word(w) = tok {
+        if tok.is(Kind::Word) {
+            let w = tok.text;
             return w.to_uppercase() == "DELETE";
         }
         return false;
@@ -1485,7 +1450,7 @@ fn is_delete(tokens: &[Token]) -> bool {
 
 fn format_update(tokens: &[Token]) -> String {
     let set_pos = tokens.iter().position(|t| {
-        matches!(t, Token::Word(w) if w.to_uppercase() == "SET")
+        t.is_word("SET")
     });
 
     let Some(set_pos) = set_pos else {
@@ -1495,7 +1460,7 @@ fn format_update(tokens: &[Token]) -> String {
     // Find WHERE position (only after SET)
     let after_set = &tokens[set_pos + 1..];
     let where_in_set = after_set.iter().position(|t| {
-        matches!(t, Token::Word(w) if w.to_uppercase() == "WHERE")
+        t.is_word("WHERE")
     });
     let where_pos = where_in_set.map(|p| set_pos + 1 + p);
 
@@ -1508,7 +1473,7 @@ fn format_update(tokens: &[Token]) -> String {
 
     // SET assignments
     let set_end = where_pos.unwrap_or({
-        if matches!(tokens.last(), Some(Token::Semicolon)) {
+        if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) {
             tokens.len() - 1
         } else {
             tokens.len()
@@ -1530,7 +1495,7 @@ fn format_update(tokens: &[Token]) -> String {
     if let Some(wp) = where_pos {
         result.push('\n');
         let remaining = &tokens[wp..];
-        let remaining_str = if matches!(remaining.last(), Some(Token::Semicolon)) {
+        let remaining_str = if remaining.last().is_some_and(|t| t.is(Kind::Semicolon)) {
             tokens_upper_string(&remaining[..remaining.len() - 1])
         } else {
             tokens_upper_string(remaining)
@@ -1539,7 +1504,7 @@ fn format_update(tokens: &[Token]) -> String {
     }
 
     // Semicolon
-    if matches!(tokens.last(), Some(Token::Semicolon)) {
+    if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) {
         result.push(';');
     }
 
@@ -1548,7 +1513,7 @@ fn format_update(tokens: &[Token]) -> String {
 
 fn format_delete(tokens: &[Token]) -> String {
     let where_pos = tokens.iter().position(|t| {
-        matches!(t, Token::Word(w) if w.to_uppercase() == "WHERE")
+        t.is_word("WHERE")
     });
 
     let mut result = String::new();
@@ -1561,7 +1526,7 @@ fn format_delete(tokens: &[Token]) -> String {
         // WHERE clause on new line
         result.push('\n');
         let remaining = &tokens[wp..];
-        let remaining_str = if matches!(remaining.last(), Some(Token::Semicolon)) {
+        let remaining_str = if remaining.last().is_some_and(|t| t.is(Kind::Semicolon)) {
             tokens_upper_string(&remaining[..remaining.len() - 1])
         } else {
             tokens_upper_string(remaining)
@@ -1572,52 +1537,49 @@ fn format_delete(tokens: &[Token]) -> String {
     }
 
     // Semicolon
-    if matches!(tokens.last(), Some(Token::Semicolon)) && !result.ends_with(';') {
+    if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) && !result.ends_with(';') {
         result.push(';');
     }
 
     result
 }
 
+/// Renders a statement reesql has no specific layout for, indenting any `(SELECT ...)`
+/// subquery it contains.
 fn format_generic(tokens: &[Token]) -> Result<String, String> {
     let mut result = String::new();
-    let mut prev_idx: Option<usize> = None;
+    let mut prev: Option<&Token> = None;
     let mut i = 0;
 
     while i < tokens.len() {
-        // Check for subquery: (SELECT ...)
         if is_subquery_start(tokens, i) {
             let close = find_matching_paren(tokens, i).unwrap();
 
-            // Add spacing before subquery based on previous token
-            let need_space_before = prev_idx.is_some_and(|p| {
+            let space_before = prev.is_some_and(|p| {
                 matches!(
-                    &tokens[p],
-                    Token::Word(_)
-                        | Token::Comma
-                        | Token::CloseParen
-                        | Token::Equals
-                        | Token::Star
-                        | Token::GreaterThan
-                        | Token::LessThan
-                        | Token::GreaterOrEqual
-                        | Token::LessOrEqual
-                        | Token::NotEquals(_)
+                    p.kind,
+                    Kind::Word
+                        | Kind::Comma
+                        | Kind::CloseParen
+                        | Kind::Equals
+                        | Kind::Star
+                        | Kind::GreaterThan
+                        | Kind::LessThan
+                        | Kind::GreaterOrEqual
+                        | Kind::LessOrEqual
+                        | Kind::NotEquals
                 )
             });
-            if need_space_before {
+            if space_before {
                 result.push(' ');
             }
 
-            // Format subquery contents recursively
-            let inner = &tokens[i + 1..close];
-            let inner_sql = tokens_upper_string(inner);
-            let formatted = format_sql(&inner_sql).map_err(|e| e.message)?;
-            let trimmed = formatted.trim();
+            // Format the subquery from its own tokens. Rendering it back to text and
+            // re-tokenizing would put the contents through an extra round trip for no reason.
+            let formatted = format_token_stream(&tokens[i + 1..close]).map_err(|e| e.message)?;
 
-            // Wrap in indented parens
             result.push_str("(\n");
-            for line in trimmed.lines() {
+            for line in formatted.trim().lines() {
                 result.push_str("    ");
                 result.push_str(line);
                 result.push('\n');
@@ -1625,72 +1587,24 @@ fn format_generic(tokens: &[Token]) -> Result<String, String> {
             result.push(')');
 
             i = close + 1;
-            prev_idx = Some(close);
+            prev = Some(&tokens[close]);
             continue;
         }
 
-        // Handle comments (same logic as tokens_upper_string)
-        if let Token::Comment(c) = &tokens[i] {
-            if prev_idx.is_some_and(|p| {
-                matches!(&tokens[p], Token::Word(_) | Token::Star | Token::CloseParen | Token::Comma)
-            }) {
+        let tok = &tokens[i];
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
                 result.push(' ');
             }
-            result.push_str(c);
-            if c.starts_with("--") || c.starts_with('#') {
-                result.push('\n');
-                prev_idx = None;
-            } else {
-                prev_idx = Some(i);
-            }
-            i += 1;
-            continue;
         }
+        result.push_str(&tok.emit());
 
-        // Spacing logic (same as tokens_upper_string)
-        let need_space = match (prev_idx.map(|idx| &tokens[idx]), &tokens[i]) {
-            (Some(Token::Word(_)), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Equals) => true,
-            (Some(Token::Equals), Token::Word(_)) => true,
-            (Some(Token::Equals), Token::OpenParen) => true,
-            (Some(Token::CloseParen), Token::Word(_)) => true,
-            (Some(Token::Comma), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Star) => true,
-            (Some(Token::Star), Token::Word(_)) => true,
-            (Some(Token::Star), Token::Comment(_)) => true,
-            (Some(Token::Comment(c)), Token::Word(_)) if !c.starts_with("--") && !c.starts_with('#') => true,
-            // Operators need spaces around them
-            (Some(Token::Word(_)), Token::GreaterThan) => true,
-            (Some(Token::GreaterThan), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::LessThan) => true,
-            (Some(Token::LessThan), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::GreaterOrEqual) => true,
-            (Some(Token::GreaterOrEqual), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::LessOrEqual) => true,
-            (Some(Token::LessOrEqual), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::NotEquals(_)) => true,
-            (Some(Token::NotEquals(_)), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Concat) => true,
-            (Some(Token::Concat), Token::Word(_)) => true,
-            (Some(Token::Word(_)), Token::Operator(_)) => true,
-            (Some(Token::Operator(_)), Token::Word(_)) => true,
-            (Some(Token::CloseParen), Token::Operator(_)) => true,
-            (Some(Token::Comment(c)), Token::Operator(_)) if !c.starts_with("--") && !c.starts_with('#') => true,
-            // A closing bracket separates from what follows, like a closing paren does.
-            (Some(Token::Symbol(']')), Token::Word(_)) => true,
-            // Detach a symbol from a preceding word (`SET @x`), but never split a
-            // bracketed subscript like `a[1]`. Nothing is glued to what follows, so
-            // prefixes such as `@x` and `:=` stay intact.
-            (Some(Token::Word(_)), Token::Symbol(c)) if !matches!(c, '[' | ']' | '{' | '}') => true,
-            _ => false,
-        };
-
-        if need_space {
-            result.push(' ');
+        if tok.is_line_comment() {
+            result.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
         }
-
-        result.push_str(&token_upper_string(&tokens[i]));
-        prev_idx = Some(i);
         i += 1;
     }
 
@@ -1732,15 +1646,32 @@ struct FormatError {
 fn format_sql(input: &str) -> Result<String, FormatError> {
     // Normalize line endings: strip \r so Windows CRLF and Unix LF are handled identically
     let input = input.replace("\r\n", "\n").replace('\r', "");
-    let (tokens, token_lines) = tokenize(&input);
-    let statements = split_statements(&tokens, &token_lines);
+    let tokens = tokenize(&input);
+
+    // The formatters only ever emit token texts and whitespace, so as long as the tokens
+    // account for every non-whitespace byte, nothing in the input can be lost. If that ever
+    // fails to hold, refuse rather than write SQL that is missing part of the original.
+    if !tokens_tile(&input, &tokens) {
+        return Err(FormatError {
+            line: 1,
+            message: "internal error: the tokenizer did not account for all input".to_string(),
+        });
+    }
+
+    format_token_stream(&tokens)
+}
+
+/// Formats an already-tokenized stream. Statement layout happens here so that nested
+/// contexts (a subquery, a trigger body) can reuse it without a text round trip.
+fn format_token_stream(tokens: &[Token]) -> Result<String, FormatError> {
+    let statements = split_statements(tokens);
 
     let mut result = String::new();
     let mut prev_type: Option<String> = None;
 
     for stmt in &statements {
-        let toks = &stmt.tokens;
-        if toks.is_empty() || (toks.len() == 1 && matches!(toks[0], Token::Semicolon)) {
+        let toks = stmt.tokens;
+        if toks.is_empty() || (toks.len() == 1 && toks[0].is(Kind::Semicolon)) {
             continue;
         }
 
@@ -1752,25 +1683,17 @@ fn format_sql(input: &str) -> Result<String, FormatError> {
             continue;
         }
 
-        // Detect if we should add a blank line separator
-        let current_type = {
-            let mut stype = String::new();
-            for tok in toks {
-                if let Token::Word(w) = tok {
-                    stype.push_str(&w.to_uppercase());
-                    stype.push(' ');
-                    if stype.split_whitespace().count() >= 2 {
-                        break;
-                    }
-                }
-            }
-            stype.trim().to_string()
-        };
+        // Statements of a different kind than the previous one get a blank line before them.
+        let current_type = toks
+            .iter()
+            .filter(|t| t.is(Kind::Word))
+            .take(2)
+            .map(|t| t.text.to_uppercase())
+            .collect::<Vec<_>>()
+            .join(" ");
 
-        if let Some(ref prev) = prev_type {
-            if *prev != current_type {
-                result.push('\n');
-            }
+        if prev_type.as_ref().is_some_and(|prev| *prev != current_type) {
+            result.push('\n');
         }
 
         result.push_str(&formatted);
@@ -1822,5 +1745,86 @@ fn main() {
         });
     } else {
         print!("{}", output);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The property the whole design rests on: whatever the input, the tokens account for
+    /// every byte that is not whitespace.
+    #[test]
+    fn tokens_tile_every_input() {
+        let cases = [
+            "",
+            "   \n\t ",
+            "SELECT 1;",
+            "select a+b, c-d, e/f, g%h from t where x<>1 and y!=2;",
+            "set @x := 5;",
+            "select `back`, \"double\", 'single', 'it''s' from t;",
+            "select a[1], b{2}, c&d, e|f, g^h, ~i from t;",
+            "-- line comment\n/* block */ # hash\nselect 1;",
+            "create trigger t after update on x for each row begin update x set a=1; end;",
+            "unterminated 'string",
+            "unterminated /* block",
+            "trailing backslash \\ and $dollar and ?param",
+        ];
+
+        for src in cases {
+            let tokens = tokenize(src);
+            assert!(tokens_tile(src, &tokens), "tokens did not tile: {src:?}");
+        }
+    }
+
+    /// No printable character may be swallowed by the tokenizer, whatever it is. This is the
+    /// regression guard for the class of bug where an unhandled character was skipped.
+    #[test]
+    fn no_printable_character_is_dropped() {
+        for c in (0x20u8..0x7f).map(char::from) {
+            let src = format!("select a {c} b from t;");
+            let tokens = tokenize(&src);
+            assert!(tokens_tile(&src, &tokens), "character {c:?} was dropped");
+        }
+    }
+
+    /// Proves the check above can actually fail — otherwise it guarantees nothing.
+    #[test]
+    fn tiling_catches_a_dropped_token() {
+        let src = "select a + b from t;";
+        let mut tokens = tokenize(src);
+        let before = tokens.len();
+        tokens.retain(|t| t.text != "+");
+        assert_eq!(tokens.len(), before - 1, "test setup: no `+` token found");
+
+        assert!(
+            !tokens_tile(src, &tokens),
+            "a dropped token slipped past the tiling check"
+        );
+    }
+
+    /// Token text is borrowed from the input, never rebuilt, so it is the user's own bytes.
+    #[test]
+    fn token_text_is_a_slice_of_the_input() {
+        let src = "select a <> 'lit' from t;";
+        for tok in tokenize(src) {
+            let start = offset_in(src, tok.text);
+            assert_eq!(&src[start..start + tok.text.len()], tok.text);
+        }
+    }
+
+    /// Only keywords change, and only in case.
+    #[test]
+    fn emit_changes_nothing_but_keyword_case() {
+        let src = "select Name, `Mixed`, 'KeepMe' from Users where a <> 1;";
+        for tok in tokenize(src) {
+            let emitted = tok.emit();
+            assert!(
+                emitted == tok.text || emitted == tok.text.to_uppercase(),
+                "{:?} was rewritten to {:?}",
+                tok.text,
+                emitted
+            );
+        }
     }
 }
