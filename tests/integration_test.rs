@@ -191,6 +191,9 @@ fn test_operators_are_never_dropped() {
         ("select \"my col\" from t;", "SELECT \"my col\" FROM t;"),
         // A lone `-` must not be mistaken for the start of a comment.
         ("select 5-3 from t;", "SELECT 5 - 3 FROM t;"),
+        // MySQL's null-safe equal, and the bit shifts.
+        ("select a<=>b from t;", "SELECT a <=> b FROM t;"),
+        ("select a<<2, b>>3 from t;", "SELECT a << 2, b >> 3 FROM t;"),
     ] {
         let (status, stdout, stderr) = run_reesql(input);
         assert!(status.success(), "reesql failed on {input:?}: {stderr}");

@@ -21,8 +21,9 @@ A MySQL SQL formatter written in Rust. Reads SQL from stdin or a file, and write
 - **Subquery formatting** - `(SELECT ...)` subqueries indented on separate lines
 - **CREATE TRIGGER formatting** - `BEGIN ... END;` bodies are recognised, so the inner `;` does not
   split the statement; body statements are formatted normally and indented
-- **Operator support** - comparison (`>`, `<`, `>=`, `<=`, `!=`, `<>`) and arithmetic (`+`, `-`, `/`, `%`)
-  operators are preserved and spaced correctly. `!=` and `<>` each keep the spelling you wrote
+- **Operator support** - comparison (`>`, `<`, `>=`, `<=`, `!=`, `<>`, MySQL's null-safe `<=>`),
+  arithmetic (`+`, `-`, `/`, `%`) and bitwise (`&`, `|`, `^`, `~`, `<<`, `>>`) operators are preserved
+  and spaced correctly. `!=` and `<>` each keep the spelling you wrote
 - **Comment preservation** - `--`, `/* */`, and `#` comments are preserved and positioned correctly
 - **In-place file editing** - pass a file path to format it in place, or use stdin/stdout
 - **Cross-platform** - normalizes `\r\n` and `\n` line endings consistently
@@ -293,7 +294,7 @@ at the top of this README structural rather than a matter of test coverage.
 
 ## Testing
 
-The project includes **39 integration tests** and 5 unit tests. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
+The project includes **39 integration tests** and 6 unit tests. Most format sample SQL inputs and compare the output against golden files; the rest check that malformed SQL is refused rather than reformatted.
 
 ```bash
 # Run all integration tests

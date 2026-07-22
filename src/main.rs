@@ -345,7 +345,11 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
             '.' => { i += 1; Some(Kind::Dot) }
             '*' => { i += 1; Some(Kind::Star) }
             '>' => {
-                if chars.get(i + 1) == Some(&'=') {
+                if chars.get(i + 1) == Some(&'>') {
+                    // Right shift.
+                    i += 2;
+                    Some(Kind::Operator)
+                } else if chars.get(i + 1) == Some(&'=') {
                     i += 2;
                     Some(Kind::GreaterOrEqual)
                 } else {
@@ -354,12 +358,20 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
                 }
             }
             '<' => {
-                if chars.get(i + 1) == Some(&'=') {
+                // MySQL's null-safe equal `<=>` has to be matched before `<=`.
+                if chars.get(i + 1) == Some(&'=') && chars.get(i + 2) == Some(&'>') {
+                    i += 3;
+                    Some(Kind::Operator)
+                } else if chars.get(i + 1) == Some(&'=') {
                     i += 2;
                     Some(Kind::LessOrEqual)
                 } else if chars.get(i + 1) == Some(&'>') {
                     i += 2;
                     Some(Kind::NotEquals)
+                } else if chars.get(i + 1) == Some(&'<') {
+                    // Left shift.
+                    i += 2;
+                    Some(Kind::Operator)
                 } else {
                     i += 1;
                     Some(Kind::LessThan)
@@ -1764,6 +1776,7 @@ mod tests {
             "set @x := 5;",
             "select `back`, \"double\", 'single', 'it''s' from t;",
             "select a[1], b{2}, c&d, e|f, g^h, ~i from t;",
+            "select a<=>b, c<<2, d>>3 from t;",
             "-- line comment\n/* block */ # hash\nselect 1;",
             "create trigger t after update on x for each row begin update x set a=1; end;",
             "unterminated 'string",
@@ -1785,6 +1798,26 @@ mod tests {
             let src = format!("select a {c} b from t;");
             let tokens = tokenize(&src);
             assert!(tokens_tile(&src, &tokens), "character {c:?} was dropped");
+        }
+    }
+
+    /// Multi-character operators lex as one token, not as an accidental pair that happens
+    /// to render correctly.
+    #[test]
+    fn multi_char_operators_are_single_tokens() {
+        for (src, op) in [
+            ("select a <=> b from t;", "<=>"),
+            ("select a << 2 from t;", "<<"),
+            ("select a >> 2 from t;", ">>"),
+            ("select a <> b from t;", "<>"),
+            ("select a >= b from t;", ">="),
+            ("select a <= b from t;", "<="),
+        ] {
+            let tokens = tokenize(src);
+            assert!(
+                tokens.iter().any(|t| t.text == op),
+                "{op:?} did not lex as one token in {src:?}"
+            );
         }
     }
 
