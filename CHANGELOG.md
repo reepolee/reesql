@@ -12,6 +12,11 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Fixed
+
+- Short `CREATE VIEW` columns using SQLite/PostgreSQL `||`, including concatenations
+  inside `CAST(... AS TEXT)`, now stay on one line when they fit within 100 characters.
+
 ## [26.7.8] - 2026-07-22
 
 ### Fixed

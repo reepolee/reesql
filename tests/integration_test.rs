@@ -25,6 +25,27 @@ fn test_create_view_sqlite() {
     run_golden_test("create_view_sqlite");
 }
 
+#[test]
+fn test_short_view_concat_stays_on_one_line_and_is_idempotent() {
+    let input = "CREATE VIEW v AS SELECT CAST(r.display || ' - ' || i.display AS TEXT) AS display FROM r JOIN i;";
+    let expected = "\
+CREATE VIEW v AS
+SELECT
+    CAST(r.display || ' - ' || i.display AS TEXT) AS display
+FROM r
+    JOIN i;";
+
+    let (status, stdout, stderr) = run_reesql(input);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql(&stdout);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "formatting should be idempotent");
+}
 
 #[test]
 fn test_create_view_movies() {

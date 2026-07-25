@@ -1260,6 +1260,16 @@ fn format_view_column(tokens: &[Token]) -> String {
         return tokens_upper_string(tokens);
     }
 
+    // Keep short concatenations readable on one line. The previous operand-count
+    // heuristic wrapped every expression with two `||` operators, even a compact
+    // CAST such as `CAST(a || ' - ' || b AS TEXT) AS display`.
+    const MAX_LINE_WIDTH: usize = 100;
+    const SELECT_COLUMN_INDENT: usize = 4;
+    let compact = tokens_upper_string(tokens);
+    if !compact.contains('\n') && SELECT_COLUMN_INDENT + compact.chars().count() <= MAX_LINE_WIDTH {
+        return compact;
+    }
+
     // Split at || to get value segments: [folder], ['__'], [filename], ...
     let mut segments = Vec::new();
     let mut current = Vec::new();
