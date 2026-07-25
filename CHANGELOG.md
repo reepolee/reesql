@@ -12,6 +12,8 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+## [26.7.9] - 2026-07-26
+
 ### Fixed
 
 - Short `CREATE VIEW` columns using SQLite/PostgreSQL `||`, including concatenations
