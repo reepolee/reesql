@@ -5,6 +5,19 @@ use std::process::{Command, Stdio};
 
 const DATA_DIR: &str = "tests/data";
 
+fn assert_format_is_idempotent(input: &str, expected: &str) {
+    let (status, stdout, stderr) = run_reesql(input);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql(&stdout);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "formatting should be idempotent");
+}
+
 #[test]
 fn test_select_join() {
     run_golden_test("select_join");
@@ -23,6 +36,128 @@ fn test_create_view() {
 #[test]
 fn test_create_view_sqlite() {
     run_golden_test("create_view_sqlite");
+}
+
+#[test]
+fn test_create_view_uses_outer_from_after_scalar_subqueries() {
+    let input = "CREATE VIEW v_frameworks AS SELECT \
+        f.id, \
+        COALESCE((SELECT lv.text_value FROM localized_values lv \
+            WHERE lv.table_name='frameworks' AND lv.record_id=f.id \
+            AND lv.field_name='name' AND lv.locale_code=?), f.name) AS name, \
+        COALESCE((SELECT lv.text_value FROM localized_values lv \
+            WHERE lv.table_name='frameworks' AND lv.record_id=f.id \
+            AND lv.field_name='display' AND lv.locale_code=?), f.display) AS display, \
+        f.tagline, f.developer_id, d.display AS developer_display \
+        FROM frameworks f \
+        LEFT JOIN developers d ON d.id=f.developer_id;";
+    let expected = "\
+CREATE VIEW v_frameworks AS
+SELECT
+    f.id,
+    COALESCE((SELECT lv.text_value FROM localized_values lv WHERE lv.table_name = 'frameworks' AND lv.record_id = f.id AND lv.field_name = 'name' AND lv.locale_code =?), f.name) AS name,
+    COALESCE((SELECT lv.text_value FROM localized_values lv WHERE lv.table_name = 'frameworks' AND lv.record_id = f.id AND lv.field_name = 'display' AND lv.locale_code =?), f.display) AS display,
+    f.tagline,
+    f.developer_id,
+    d.display AS developer_display
+FROM frameworks f
+    LEFT JOIN developers d
+        ON d.id = f.developer_id;";
+
+    let (status, stdout, stderr) = run_reesql(input);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql(&stdout);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "formatting should be idempotent");
+}
+
+#[test]
+fn test_nested_query_clauses_do_not_escape_to_outer_statements() {
+    let cases = [
+        (
+            "UPDATE targets SET value = (SELECT MAX(value) FROM source WHERE source.id = targets.id), changed = 1 WHERE targets.id = 7;",
+            "\
+UPDATE targets
+SET
+    value = (SELECT MAX(value) FROM source WHERE source.id = targets.id),
+    changed = 1
+WHERE targets.id = 7;",
+        ),
+        (
+            "DELETE targets FROM targets JOIN (SELECT id FROM source WHERE active = 0) stale ON stale.id = targets.id WHERE targets.active = 0;",
+            "\
+DELETE targets FROM targets JOIN(SELECT id FROM source WHERE active = 0) stale ON stale.id = targets.id
+WHERE targets.active = 0;",
+        ),
+        (
+            "CREATE VIEW v_derived AS SELECT d.id FROM (SELECT id FROM source WHERE active = 1) d LEFT JOIN flags f ON f.id = d.id AND EXISTS (SELECT 1 FROM checks WHERE checks.id = f.id) WHERE f.id IS NULL LIMIT 1;",
+            "\
+CREATE VIEW v_derived AS
+SELECT
+    d.id
+FROM (SELECT id FROM source WHERE active = 1) d
+    LEFT JOIN flags f
+        ON f.id = d.id AND EXISTS(SELECT 1 FROM checks WHERE checks.id = f.id)
+WHERE f.id IS NULL
+LIMIT 1;",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        assert_format_is_idempotent(input, expected);
+    }
+}
+
+#[test]
+fn test_create_table_as_select_function_is_not_a_column_list() {
+    assert_format_is_idempotent(
+        "CREATE TABLE copied AS SELECT COALESCE(source_id, 0) AS source_id FROM source;",
+        "CREATE TABLE copied AS SELECT COALESCE(source_id, 0) AS source_id FROM source;",
+    );
+}
+
+#[test]
+fn test_insert_spacing_does_not_rewrite_quoted_identifier() {
+    assert_format_is_idempotent(
+        "INSERT INTO \"archive(2026)\" (id) VALUES (1);",
+        "INSERT INTO \"archive(2026)\" (id) VALUES (1);",
+    );
+}
+
+#[test]
+fn test_create_view_cte_and_join_variants_use_outer_boundaries() {
+    let cases = [
+        (
+            "CREATE VIEW v_cte AS WITH current_ids AS (SELECT id FROM source WHERE active = 1) SELECT current_ids.id FROM current_ids;",
+            "\
+CREATE VIEW v_cte AS WITH current_ids AS(SELECT id FROM source WHERE active = 1)
+SELECT
+    current_ids.id
+FROM current_ids;",
+        ),
+        (
+            "CREATE VIEW v_joins AS SELECT a.id FROM a CROSS JOIN b NATURAL LEFT JOIN c FULL OUTER JOIN d ON d.id = a.id LIMIT 1;",
+            "\
+CREATE VIEW v_joins AS
+SELECT
+    a.id
+FROM a
+    CROSS JOIN b
+    NATURAL LEFT JOIN c
+    FULL OUTER JOIN d
+        ON d.id = a.id
+LIMIT 1;",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        assert_format_is_idempotent(input, expected);
+    }
 }
 
 #[test]
@@ -374,6 +509,29 @@ fn test_formatting_only_changes_whitespace_and_case() {
     }
 
     assert!(checked > 0, "no .input.sql fixtures were checked");
+}
+
+#[test]
+fn test_all_golden_outputs_are_idempotent() {
+    let mut checked = 0;
+    for entry in fs::read_dir(DATA_DIR).expect("read tests/data") {
+        let path = entry.expect("dir entry").path();
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        if !name.ends_with(".golden.sql") {
+            continue;
+        }
+
+        let formatted = fs::read_to_string(&path)
+            .expect("read golden SQL")
+            .replace("\r\n", "\n")
+            .replace('\r', "");
+        let (status, second, stderr) = run_reesql(&formatted);
+        assert!(status.success(), "reesql failed on {name}: {stderr}");
+        assert_eq!(second, formatted, "{name} is not idempotent");
+        checked += 1;
+    }
+
+    assert!(checked > 0, "no .golden.sql fixtures were checked");
 }
 
 fn run_reesql(input: &str) -> (std::process::ExitStatus, String, String) {

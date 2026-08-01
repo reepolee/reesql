@@ -12,6 +12,20 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Fixed
+
+- Nested queries in `CREATE VIEW`, `UPDATE`, and joined `DELETE` statements no longer
+  donate their `FROM`, `WHERE`, joins, or trailing clauses to the outer statement's
+  layout.
+- `CREATE TABLE ... AS SELECT function(...)` no longer mistakes the selected function's
+  parenthesis for a table column list.
+- INSERT column-list spacing is token-aware and no longer inserts spaces inside quoted
+  identifiers containing `(`.
+- CRLF normalization no longer deletes carriage returns stored inside string literals,
+  quoted identifiers, or block comments.
+- View formatting recognizes CTE bodies, compound join prefixes, derived tables, nested
+  `ON` predicates, and trailing clauses at their correct parenthesis depth.
+
 ## [26.7.9] - 2026-07-26
 
 ### Fixed

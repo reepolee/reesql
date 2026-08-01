@@ -320,9 +320,9 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
 
     let mut line_of = Vec::with_capacity(chars.len());
     let mut line = 1;
-    for &c in &chars {
+    for (idx, &c) in chars.iter().enumerate() {
         line_of.push(line);
-        if c == '\n' {
+        if c == '\n' || (c == '\r' && chars.get(idx + 1) != Some(&'\n')) {
             line += 1;
         }
     }
@@ -435,7 +435,7 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
                 Some(Kind::Word)
             }
             _ if c == '-' && chars.get(i + 1) == Some(&'-') => {
-                while i < chars.len() && chars[i] != '\n' {
+                while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
                     i += 1;
                 }
                 Some(Kind::Comment)
@@ -678,13 +678,7 @@ fn is_create_view(tokens: &[Token]) -> Option<usize> {
         return None;
     }
 
-    tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| !t.is(Kind::Comment))
-        .skip(2)
-        .find(|(_, t)| t.is_word("SELECT"))
-        .map(|(idx, _)| idx)
+    find_top_level_word(tokens, "SELECT")
 }
 
 fn is_insert(tokens: &[Token]) -> bool {
@@ -811,6 +805,16 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
         return format_generic(tokens);
     };
 
+    // In CREATE TABLE ... AS SELECT / LIKE, a later parenthesis belongs to the query or
+    // source expression, not to a table column list.
+    if ["AS", "LIKE"]
+        .iter()
+        .filter_map(|word| find_top_level_word(tokens, word))
+        .any(|clause_pos| clause_pos < paren_pos)
+    {
+        return format_generic(tokens);
+    }
+
     let mut result = String::new();
 
     // Format: CREATE TABLE [IF NOT EXISTS] name (
@@ -915,14 +919,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
 }
 
 fn format_insert(tokens: &[Token]) -> Result<String, String> {
-    let values_pos = tokens.iter().position(|t| {
-        if t.is(Kind::Word) {
-            let w = t.text;
-            w.to_uppercase() == "VALUES"
-        } else {
-            false
-        }
-    });
+    let values_pos = find_top_level_word(tokens, "VALUES");
 
     let Some(values_idx) = values_pos else {
         return Ok(tokens_upper_string(tokens));
@@ -931,9 +928,17 @@ fn format_insert(tokens: &[Token]) -> Result<String, String> {
     let prelude = &tokens[..=values_idx];
     let values_tokens = &tokens[values_idx + 1..];
 
-    let mut prelude_str = tokens_upper_string(prelude);
-    // Insert space before the column list paren
-    prelude_str = prelude_str.replacen("(", " (", 1);
+    // Insert a space before the structural column-list parenthesis without searching the
+    // rendered text: `(` inside a quoted identifier or comment is user data.
+    let prelude_str = if let Some(paren_pos) = prelude.iter().position(|t| t.is(Kind::OpenParen)) {
+        format!(
+            "{} {}",
+            tokens_upper_string(&prelude[..paren_pos]),
+            tokens_upper_string(&prelude[paren_pos..])
+        )
+    } else {
+        tokens_upper_string(prelude)
+    };
 
     // Parse value tuples, plus any clause that follows them (ON CONFLICT, RETURNING, ...)
     let (tuples, tail) = parse_value_tuples(values_tokens)?;
@@ -1164,6 +1169,23 @@ fn is_simple_expression(tokens: &[Token]) -> bool {
         .all(|t| t.is(Kind::Word) || t.is(Kind::Dot))
 }
 
+/// Finds a keyword outside parenthesized expressions. A view's SELECT list can contain
+/// scalar subqueries, whose clause keywords must not be mistaken for the outer query's.
+fn find_top_level_word(tokens: &[Token], word: &str) -> Option<usize> {
+    let mut depth = 0usize;
+
+    for (idx, tok) in tokens.iter().enumerate() {
+        match tok.kind {
+            Kind::OpenParen => depth += 1,
+            Kind::CloseParen => depth = depth.saturating_sub(1),
+            Kind::Word if depth == 0 && tok.is_word(word) => return Some(idx),
+            _ => {}
+        }
+    }
+
+    None
+}
+
 fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
     let prelude = &tokens[..select_pos];
     let select_tokens = &tokens[select_pos..];
@@ -1171,14 +1193,7 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
     let prelude_str = tokens_upper_string(prelude);
 
     // Parse SELECT columns until FROM
-    let from_pos = select_tokens.iter().position(|t| {
-        if t.is(Kind::Word) {
-            let w = t.text;
-            w.to_uppercase() == "FROM"
-        } else {
-            false
-        }
-    });
+    let from_pos = find_top_level_word(select_tokens, "FROM");
 
     let from_pos = match from_pos {
         Some(p) => p,
@@ -1309,91 +1324,146 @@ fn format_view_column(tokens: &[Token]) -> String {
     result
 }
 
+fn is_join_start(tok: &Token) -> bool {
+    [
+        "JOIN",
+        "LEFT",
+        "RIGHT",
+        "INNER",
+        "CROSS",
+        "NATURAL",
+        "FULL",
+        "STRAIGHT_JOIN",
+    ]
+    .iter()
+    .any(|word| tok.is_word(word))
+}
+
+fn is_query_tail_start(tok: &Token) -> bool {
+    [
+        "WHERE",
+        "GROUP",
+        "ORDER",
+        "HAVING",
+        "LIMIT",
+        "UNION",
+        "EXCEPT",
+        "INTERSECT",
+    ]
+    .iter()
+    .any(|word| tok.is_word(word))
+}
+
+fn update_paren_depth(tok: &Token, depth: &mut usize) {
+    match tok.kind {
+        Kind::OpenParen => *depth += 1,
+        Kind::CloseParen => *depth = depth.saturating_sub(1),
+        _ => {}
+    }
+}
+
 fn format_from_clause_tokens(tokens: &[Token]) -> String {
     let mut result = String::new();
     let mut i = 0;
 
     while i < tokens.len() {
         if tokens[i].is(Kind::Word) {
-            let w = tokens[i].text;
-            let upper = w.to_uppercase();
-            if upper == "FROM" {
+            if tokens[i].is_word("FROM") {
                 result.push_str("FROM");
                 i += 1;
                 // Collect table reference
                 let start = i;
+                let mut depth = 0usize;
                 while i < tokens.len() {
-                    if tokens[i].is(Kind::Word) {
-                        let w = tokens[i].text;
-                        let wu = w.to_uppercase();
-                        if wu == "JOIN" || wu == "LEFT" || wu == "RIGHT" || wu == "INNER"
-                            || wu == "CROSS" || wu == "NATURAL" || wu == "WHERE"
-                            || wu == "GROUP" || wu == "ORDER" || wu == "LIMIT" || wu == "HAVING"
-                        {
-                            break;
-                        }
-                    }
-                    if tokens[i].is(Kind::Semicolon) {
+                    if depth == 0
+                        && (is_join_start(&tokens[i]) || is_query_tail_start(&tokens[i]))
+                    {
                         break;
                     }
+                    if depth == 0 && tokens[i].is(Kind::Semicolon) {
+                        break;
+                    }
+                    update_paren_depth(&tokens[i], &mut depth);
                     i += 1;
                 }
                 let table_str = tokens_upper_string(&tokens[start..i]);
                 result.push(' ');
                 result.push_str(&table_str);
-            } else if upper == "JOIN" || upper == "LEFT" || upper == "RIGHT"
-                || upper == "INNER" || upper == "CROSS" || upper == "NATURAL"
-            {
+            } else if is_join_start(&tokens[i]) {
                 result.push('\n');
                 result.push_str("    ");
                 let start = i;
-                // Collect up to ON (or next JOIN)
+
+                // Consume compound join prefixes such as NATURAL LEFT JOIN and
+                // LEFT OUTER JOIN before scanning the joined relation.
                 while i < tokens.len() {
-                    if tokens[i].is(Kind::Word) {
-                        let w = tokens[i].text;
-                        if w.to_uppercase() == "ON" {
-                            break;
-                        }
-                    }
-                    if tokens[i].is(Kind::Semicolon) {
+                    if tokens[i].is_word("JOIN") || tokens[i].is_word("STRAIGHT_JOIN") {
+                        i += 1;
                         break;
                     }
+                    if ["LEFT", "RIGHT", "INNER", "CROSS", "NATURAL", "FULL", "OUTER"]
+                        .iter()
+                        .any(|word| tokens[i].is_word(word))
+                    {
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+
+                // Collect the relation up to a top-level ON, trailing clause, or next join.
+                let mut depth = 0usize;
+                while i < tokens.len() {
+                    if depth == 0
+                        && (tokens[i].is_word("ON")
+                            || is_join_start(&tokens[i])
+                            || is_query_tail_start(&tokens[i]))
+                    {
+                        break;
+                    }
+                    if depth == 0 && tokens[i].is(Kind::Semicolon) {
+                        break;
+                    }
+                    update_paren_depth(&tokens[i], &mut depth);
                     i += 1;
                 }
                 let join_part = tokens_upper_string(&tokens[start..i]);
                 result.push_str(&join_part);
-                if i < tokens.len()
-                    && tokens[i].is(Kind::Word) {
-                        let w = tokens[i].text;
-                        if w.to_uppercase() == "ON" {
-                            result.push('\n');
-                            result.push_str("        ");
-                            let on_start = i;
-                            while i < tokens.len() {
-                                if tokens[i].is(Kind::Word) {
-                                    let w = tokens[i].text;
-                                    let wu = w.to_uppercase();
-                                    if wu == "JOIN" || wu == "LEFT" || wu == "RIGHT"
-                                        || wu == "INNER" || wu == "CROSS" || wu == "NATURAL"
-                                        || wu == "WHERE" || wu == "GROUP" || wu == "ORDER"
-                                    {
-                                        break;
-                                    }
-                                }
-                                if tokens[i].is(Kind::Semicolon) {
-                                    break;
-                                }
-                                i += 1;
-                            }
-                            let on_part = tokens_upper_string(&tokens[on_start..i]);
-                            result.push_str(&on_part);
-                            continue;
+
+                if i < tokens.len() && tokens[i].is_word("ON") {
+                    result.push('\n');
+                    result.push_str("        ");
+                    let on_start = i;
+                    let mut depth = 0usize;
+                    while i < tokens.len() {
+                        if i > on_start
+                            && depth == 0
+                            && (is_join_start(&tokens[i]) || is_query_tail_start(&tokens[i]))
+                        {
+                            break;
                         }
+                        if depth == 0 && tokens[i].is(Kind::Semicolon) {
+                            break;
+                        }
+                        update_paren_depth(&tokens[i], &mut depth);
+                        i += 1;
                     }
-            } else if upper == "WHERE" || upper == "GROUP" || upper == "ORDER" || upper == "HAVING" {
+                    let on_part = tokens_upper_string(&tokens[on_start..i]);
+                    result.push_str(&on_part);
+                }
+                continue;
+            } else if is_query_tail_start(&tokens[i]) {
                 result.push('\n');
                 let start = i;
-                while i < tokens.len() && !tokens[i].is(Kind::Semicolon) {
+                let mut depth = 0usize;
+                while i < tokens.len() {
+                    if i > start && depth == 0 && is_query_tail_start(&tokens[i]) {
+                        break;
+                    }
+                    if depth == 0 && tokens[i].is(Kind::Semicolon) {
+                        break;
+                    }
+                    update_paren_depth(&tokens[i], &mut depth);
                     i += 1;
                 }
                 result.push_str(&tokens_upper_string(&tokens[start..i]));
@@ -1471,9 +1541,7 @@ fn is_delete(tokens: &[Token]) -> bool {
 }
 
 fn format_update(tokens: &[Token]) -> String {
-    let set_pos = tokens.iter().position(|t| {
-        t.is_word("SET")
-    });
+    let set_pos = find_top_level_word(tokens, "SET");
 
     let Some(set_pos) = set_pos else {
         return tokens_upper_string(tokens);
@@ -1481,9 +1549,7 @@ fn format_update(tokens: &[Token]) -> String {
 
     // Find WHERE position (only after SET)
     let after_set = &tokens[set_pos + 1..];
-    let where_in_set = after_set.iter().position(|t| {
-        t.is_word("WHERE")
-    });
+    let where_in_set = find_top_level_word(after_set, "WHERE");
     let where_pos = where_in_set.map(|p| set_pos + 1 + p);
 
     let mut result = String::new();
@@ -1534,9 +1600,7 @@ fn format_update(tokens: &[Token]) -> String {
 }
 
 fn format_delete(tokens: &[Token]) -> String {
-    let where_pos = tokens.iter().position(|t| {
-        t.is_word("WHERE")
-    });
+    let where_pos = find_top_level_word(tokens, "WHERE");
 
     let mut result = String::new();
 
@@ -1660,20 +1724,21 @@ fn format_statement(tokens: &[Token]) -> Result<String, String> {
 }
 
 /// Refusal to format, pointing at the line the offending statement starts on.
+#[derive(Debug)]
 struct FormatError {
     line: usize,
     message: String,
 }
 
 fn format_sql(input: &str) -> Result<String, FormatError> {
-    // Normalize line endings: strip \r so Windows CRLF and Unix LF are handled identically
-    let input = input.replace("\r\n", "\n").replace('\r', "");
-    let tokens = tokenize(&input);
+    // Line-ending characters between tokens are discarded like other source whitespace,
+    // while carriage returns inside literals, quoted identifiers, and comments remain data.
+    let tokens = tokenize(input);
 
     // The formatters only ever emit token texts and whitespace, so as long as the tokens
     // account for every non-whitespace byte, nothing in the input can be lost. If that ever
     // fails to hold, refuse rather than write SQL that is missing part of the original.
-    if !tokens_tile(&input, &tokens) {
+    if !tokens_tile(input, &tokens) {
         return Err(FormatError {
             line: 1,
             message: "internal error: the tokenizer did not account for all input".to_string(),
@@ -1868,6 +1933,49 @@ mod tests {
                 tok.text,
                 emitted
             );
+        }
+    }
+
+    /// Formatting may move whitespace between tokens, but it must never rewrite token text.
+    /// Unlike whitespace-squashing comparisons, this catches changes inside quoted names,
+    /// string literals, and comments where whitespace is meaningful user data.
+    #[test]
+    fn formatting_preserves_every_emitted_token() {
+        let mut inputs = vec![
+            "INSERT INTO \"archive(2026)\" (id) VALUES (1);".to_string(),
+            "SELECT 'keep  internal  spaces', \"quoted name\" FROM t;".to_string(),
+            "SELECT 'keep\r\nline ending', \"quoted\rname\" FROM t;".to_string(),
+            "SELECT 1 /* keep ( comment spacing */ FROM t;".to_string(),
+        ];
+
+        for entry in std::fs::read_dir("tests/data").expect("read tests/data") {
+            let path = entry.expect("dir entry").path();
+            if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".input.sql"))
+            {
+                inputs.push(std::fs::read_to_string(path).expect("read SQL fixture"));
+            }
+        }
+
+        for input in inputs {
+            let output = format_sql(&input).expect("fixture should format");
+            let before = tokenize(&input);
+            let after = tokenize(&output);
+
+            assert_eq!(
+                after.len(),
+                before.len(),
+                "formatting changed token boundaries for {input:?}"
+            );
+            for (expected, actual) in before.iter().zip(after.iter()) {
+                assert_eq!(
+                    actual.text,
+                    expected.emit(),
+                    "formatting rewrote token {:?} for {input:?}",
+                    expected.text
+                );
+            }
         }
     }
 }
