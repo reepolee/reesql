@@ -212,6 +212,14 @@ fn test_comments() {
     run_golden_test("comments");
 }
 
+/// Words such as `location`, `date`, `tables` and `rank` are non-reserved: legal identifiers
+/// even though they are keywords elsewhere. Naming a column or table with one must not
+/// upper-case it, while the same word in keyword position still must.
+#[test]
+fn test_non_reserved_identifiers() {
+    run_golden_test("non_reserved_identifiers");
+}
+
 #[test]
 fn test_mixed() {
     run_golden_test("mixed");

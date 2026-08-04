@@ -94,6 +94,15 @@ impl<'a> Token<'a> {
             self.text.to_string()
         }
     }
+
+    /// Emits a token that sits in a position where SQL expects a name, not a keyword.
+    /// Words like `location`, `date`, `rank` and `tables` are non-reserved: they are legal
+    /// identifiers even though they appear in [`KEYWORDS`]. Upper-casing them there would
+    /// rewrite the user's own column and table names, so identifier positions keep their
+    /// text verbatim.
+    fn emit_identifier(&self) -> String {
+        self.text.to_string()
+    }
 }
 
 static KEYWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
@@ -639,6 +648,141 @@ fn tokens_upper_string(tokens: &[Token]) -> String {
     s
 }
 
+/// Renders a clause whose trailing word names an object, such as `CREATE TABLE tables` or
+/// `DROP TABLE IF EXISTS tables`. Everything up to that final word is ordinary keyword text.
+fn tokens_upper_string_trailing_name(tokens: &[Token]) -> String {
+    let last_word = tokens.iter().rposition(|t| t.is(Kind::Word));
+
+    let mut s = String::new();
+    let mut prev: Option<&Token> = None;
+
+    for (idx, tok) in tokens.iter().enumerate() {
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
+                s.push(' ');
+            }
+        }
+
+        if Some(idx) == last_word {
+            s.push_str(&tok.emit_identifier());
+        } else {
+            s.push_str(&tok.emit());
+        }
+
+        if tok.is_line_comment() {
+            s.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
+        }
+    }
+
+    s
+}
+
+/// Renders tokens the way [`tokens_upper_string`] does, but treats the run's first code word
+/// as an identifier so a non-reserved keyword used as a name keeps its case.
+fn tokens_upper_string_named(tokens: &[Token]) -> String {
+    let mut s = String::new();
+    let mut prev: Option<&Token> = None;
+    let mut name_seen = false;
+
+    for tok in tokens {
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
+                s.push(' ');
+            }
+        }
+
+        let is_name = !name_seen && tok.is(Kind::Word);
+        if is_name {
+            name_seen = true;
+            s.push_str(&tok.emit_identifier());
+        } else {
+            s.push_str(&tok.emit());
+        }
+
+        if tok.is_line_comment() {
+            s.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
+        }
+    }
+
+    s
+}
+
+/// Renders an `INSERT ... INTO name VALUES` prelude that carries no column list. The target
+/// name is whatever word follows `INTO`, which is an identifier position even when the word
+/// is a non-reserved keyword.
+fn tokens_upper_string_insert_target(tokens: &[Token]) -> String {
+    let into_pos = tokens.iter().position(|t| t.is_word("INTO"));
+    let name_pos = into_pos.and_then(|idx| {
+        tokens
+            .iter()
+            .enumerate()
+            .skip(idx + 1)
+            .find(|(_, t)| t.is(Kind::Word))
+            .map(|(i, _)| i)
+    });
+
+    let mut s = String::new();
+    let mut prev: Option<&Token> = None;
+
+    for (idx, tok) in tokens.iter().enumerate() {
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
+                s.push(' ');
+            }
+        }
+
+        if Some(idx) == name_pos {
+            s.push_str(&tok.emit_identifier());
+        } else {
+            s.push_str(&tok.emit());
+        }
+
+        if tok.is_line_comment() {
+            s.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
+        }
+    }
+
+    s
+}
+
+/// Renders a run in which every word is a name, such as an `INSERT` column list.
+fn tokens_upper_string_all_named(tokens: &[Token]) -> String {
+    let mut s = String::new();
+    let mut prev: Option<&Token> = None;
+
+    for tok in tokens {
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
+                s.push(' ');
+            }
+        }
+
+        if tok.is(Kind::Word) {
+            s.push_str(&tok.emit_identifier());
+        } else {
+            s.push_str(&tok.emit());
+        }
+
+        if tok.is_line_comment() {
+            s.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
+        }
+    }
+
+    s
+}
+
 /// Renders tokens with no spacing between them, for INSERT value tuples.
 fn tokens_upper_string_nospace(tokens: &[Token]) -> String {
     let mut s = String::new();
@@ -819,7 +963,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
 
     // Format: CREATE TABLE [IF NOT EXISTS] name (
     let prelude = &tokens[..paren_pos];
-    let prelude_str = tokens_upper_string(prelude);
+    let prelude_str = tokens_upper_string_trailing_name(prelude);
     result.push_str(&prelude_str);
     result.push_str(" (\n");
 
@@ -865,7 +1009,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
                 .unwrap_or(0);
 
             for (idx, col) in col_defs.iter().enumerate() {
-                let name_str = tokens_upper_string(col.name_tokens);
+                let name_str = tokens_upper_string_named(col.name_tokens);
                 let type_str = tokens_upper_string(col.type_tokens);
                 let constraint_str = tokens_upper_string(col.constraint_tokens);
 
@@ -930,14 +1074,24 @@ fn format_insert(tokens: &[Token]) -> Result<String, String> {
 
     // Insert a space before the structural column-list parenthesis without searching the
     // rendered text: `(` inside a quoted identifier or comment is user data.
+    // `INSERT INTO tables (title) VALUES` names the table just before the `(` and lists only
+    // column names inside it, so both sides are identifier positions. The trailing `VALUES`
+    // still has to upper-case, so the column list is closed off before it.
     let prelude_str = if let Some(paren_pos) = prelude.iter().position(|t| t.is(Kind::OpenParen)) {
-        format!(
-            "{} {}",
-            tokens_upper_string(&prelude[..paren_pos]),
-            tokens_upper_string(&prelude[paren_pos..])
-        )
+        let close_pos = find_matching_paren(prelude, paren_pos).unwrap_or(prelude.len() - 1);
+        let columns_str = tokens_upper_string_all_named(&prelude[paren_pos..=close_pos]);
+        let tail_str = tokens_upper_string(&prelude[close_pos + 1..]);
+        let head_str = tokens_upper_string_trailing_name(&prelude[..paren_pos]);
+
+        if tail_str.is_empty() {
+            format!("{} {}", head_str, columns_str)
+        } else {
+            format!("{} {} {}", head_str, columns_str, tail_str)
+        }
     } else {
-        tokens_upper_string(prelude)
+        // Without a column list the prelude ends `... INTO name VALUES`, so the name is the
+        // next-to-last word rather than the trailing one.
+        tokens_upper_string_insert_target(prelude)
     };
 
     // Parse value tuples, plus any clause that follows them (ON CONFLICT, RETURNING, ...)
@@ -1144,7 +1298,19 @@ fn split_trigger_body<'a>(tokens: &'a [Token<'a>]) -> Vec<&'a [Token<'a>]> {
 }
 
 fn format_drop(tokens: &[Token]) -> String {
-    tokens_upper_string(tokens)
+    // `DROP TABLE IF EXISTS tables;` ends on the object's name, which may be a non-reserved
+    // keyword. The semicolon is not a word, so it does not disturb the search for that name.
+    let body = if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) {
+        &tokens[..tokens.len() - 1]
+    } else {
+        tokens
+    };
+
+    let mut s = tokens_upper_string_trailing_name(body);
+    if body.len() < tokens.len() {
+        s.push(';');
+    }
+    s
 }
 
 fn find_as_position(tokens: &[Token]) -> Option<usize> {
@@ -1236,7 +1402,8 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
         } else if let Some(as_pos) = find_as_position(col_tokens) {
             let expr = &col_tokens[..as_pos];
             let expr_str = tokens_upper_string(expr);
-            let rest_str = tokens_upper_string(&col_tokens[as_pos..]);
+            // `AS` stays a keyword; the alias it introduces is a name.
+            let rest_str = tokens_upper_string_trailing_name(&col_tokens[as_pos..]);
             if is_simple_expression(expr) {
                 // Align AS keyword vertically with other simple columns
                 format!("{:width$} {}", expr_str, rest_str, width = max_expr_width)
@@ -1968,12 +2135,17 @@ mod tests {
                 before.len(),
                 "formatting changed token boundaries for {input:?}"
             );
+            // Whether a keyword-set word upper-cases depends on its position: in an identifier
+            // position it keeps the user's case. So the guarantee is that every token comes back
+            // as the user's own bytes, differing at most in case - never as invented text.
             for (expected, actual) in before.iter().zip(after.iter()) {
-                assert_eq!(
-                    actual.text,
-                    expected.emit(),
-                    "formatting rewrote token {:?} for {input:?}",
-                    expected.text
+                let unchanged = actual.text == expected.text;
+                let upper_cased = actual.text == expected.text.to_uppercase();
+                assert!(
+                    unchanged || upper_cased,
+                    "formatting rewrote token {:?} to {:?} for {input:?}",
+                    expected.text,
+                    actual.text
                 );
             }
         }
