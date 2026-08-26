@@ -55,8 +55,16 @@ fn test_create_view_uses_outer_from_after_scalar_subqueries() {
 CREATE VIEW v_frameworks AS
 SELECT
     f.id,
-    COALESCE((SELECT lv.text_value FROM localized_values lv WHERE lv.table_name = 'frameworks' AND lv.record_id = f.id AND lv.field_name = 'name' AND lv.locale_code =?), f.name) AS name,
-    COALESCE((SELECT lv.text_value FROM localized_values lv WHERE lv.table_name = 'frameworks' AND lv.record_id = f.id AND lv.field_name = 'display' AND lv.locale_code =?), f.display) AS display,
+    COALESCE((SELECT
+        lv.text_value
+    FROM localized_values lv
+    WHERE lv.table_name = 'frameworks' AND lv.record_id = f.id AND lv.field_name = 'name' AND lv.locale_code =?
+    ), f.name) AS name,
+    COALESCE((SELECT
+        lv.text_value
+    FROM localized_values lv
+    WHERE lv.table_name = 'frameworks' AND lv.record_id = f.id AND lv.field_name = 'display' AND lv.locale_code =?
+    ), f.display) AS display,
     f.tagline,
     f.developer_id,
     d.display AS developer_display
@@ -102,7 +110,7 @@ SELECT
     d.id
 FROM (SELECT id FROM source WHERE active = 1) d
     LEFT JOIN flags f
-        ON f.id = d.id AND EXISTS(SELECT 1 FROM checks WHERE checks.id = f.id)
+        ON f.id = d.id AND EXISTS (SELECT 1 FROM checks WHERE checks.id = f.id)
 WHERE f.id IS NULL
 LIMIT 1;",
         ),
@@ -136,9 +144,7 @@ fn test_create_view_cte_and_join_variants_use_outer_boundaries() {
             "CREATE VIEW v_cte AS WITH current_ids AS (SELECT id FROM source WHERE active = 1) SELECT current_ids.id FROM current_ids;",
             "\
 CREATE VIEW v_cte AS WITH current_ids AS(SELECT id FROM source WHERE active = 1)
-SELECT
-    current_ids.id
-FROM current_ids;",
+SELECT current_ids.id FROM current_ids;",
         ),
         (
             "CREATE VIEW v_joins AS SELECT a.id FROM a CROSS JOIN b NATURAL LEFT JOIN c FULL OUTER JOIN d ON d.id = a.id LIMIT 1;",
@@ -165,10 +171,7 @@ fn test_short_view_concat_stays_on_one_line_and_is_idempotent() {
     let input = "CREATE VIEW v AS SELECT CAST(r.display || ' - ' || i.display AS TEXT) AS display FROM r JOIN i;";
     let expected = "\
 CREATE VIEW v AS
-SELECT
-    CAST(r.display || ' - ' || i.display AS TEXT) AS display
-FROM r
-    JOIN i;";
+SELECT CAST(r.display || ' - ' || i.display AS TEXT) AS display FROM r JOIN i;";
 
     let (status, stdout, stderr) = run_reesql(input);
     assert!(status.success(), "reesql failed: {stderr}");

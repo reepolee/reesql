@@ -23,7 +23,19 @@ SET
     `status` = 'paid'
 WHERE `user_id` <> 3 AND `total` >= 100 % 7;
 
-SELECT o.`id`, o.`total` + o.`discount` AS gross, CONCAT(u.`first`, ' ', u.`last`) AS full_name, CASE WHEN o.`total` > 100 THEN 'big' ELSE 'small' END AS bucket FROM `orders` o INNER JOIN `users` u ON u.`id` = o.`user_id` WHERE o.`status` != 'new' GROUP BY o.`id` HAVING gross > 0 ORDER BY o.`created_at` DESC LIMIT 10 OFFSET 5;
+SELECT
+    o.`id`,
+    o.`total` + o.`discount` AS gross,
+    CONCAT(u.`first`, ' ', u.`last`) AS full_name,
+    CASE WHEN o.`total` > 100 THEN 'big' ELSE 'small' END AS bucket
+FROM `orders` o
+    INNER JOIN `users` u
+        ON u.`id` = o.`user_id`
+WHERE o.`status` != 'new'
+GROUP BY o.`id`
+HAVING gross > 0
+ORDER BY o.`created_at` DESC
+LIMIT 10 OFFSET 5;
 
 DELETE FROM `orders`
 WHERE `created_at` < NOW() - INTERVAL 30 DAY;

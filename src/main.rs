@@ -606,6 +606,8 @@ fn needs_space(prev: &Token, tok: &Token) -> bool {
         (Word, Word) => true,
         (Word, Equals) | (Equals, Word) | (Equals, OpenParen) => true,
         (CloseParen, Word) | (Comma, Word) => true,
+        // Space between IN/EXISTS/BETWEEN and their opening paren.
+        (Word, OpenParen) if prev.is_word("IN") || prev.is_word("EXISTS") || prev.is_word("BETWEEN") => true,
         (Word, Star) | (Star, Word) => true,
         // Keep a comment off the token it trails.
         (Word | Star | CloseParen | Comma, Comment) => true,
@@ -613,6 +615,7 @@ fn needs_space(prev: &Token, tok: &Token) -> bool {
         (Word, GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator) => true,
         (GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator, Word) => true,
         (CloseParen, Operator) => true,
+        (CloseParen, GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat) => true,
         // A closing bracket separates from what follows, like a closing paren does.
         (Symbol, Word) if prev.text == "]" => true,
         // Detach a symbol from a preceding word (`SET @x`), but never split a bracketed
@@ -1066,7 +1069,7 @@ fn format_insert(tokens: &[Token]) -> Result<String, String> {
     let values_pos = find_top_level_word(tokens, "VALUES");
 
     let Some(values_idx) = values_pos else {
-        return Ok(tokens_upper_string(tokens));
+        return Ok(format_expr_with_subqueries(tokens));
     };
 
     let prelude = &tokens[..=values_idx];
@@ -1352,18 +1355,132 @@ fn find_top_level_word(tokens: &[Token], word: &str) -> Option<usize> {
     None
 }
 
-fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
-    let prelude = &tokens[..select_pos];
-    let select_tokens = &tokens[select_pos..];
+/// Formats the body of a SELECT statement: column list with AS-alignment, then
+/// FROM clause with JOIN/ON line breaks. Works for both standalone SELECT and
+/// CREATE VIEW ... SELECT.
+/// Checks whether a word is one of the set operators: UNION, UNION ALL,
+/// INTERSECT, or EXCEPT.
+fn is_set_operator(tok: &Token) -> bool {
+    tok.is_word("UNION") || tok.is_word("INTERSECT") || tok.is_word("EXCEPT")
+}
 
-    let prelude_str = tokens_upper_string(prelude);
+/// Finds the first set operator (UNION/INTERSECT/EXCEPT) at the top level.
+fn find_set_operator(tokens: &[Token]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (idx, tok) in tokens.iter().enumerate() {
+        match tok.kind {
+            Kind::OpenParen => depth += 1,
+            Kind::CloseParen => depth = depth.saturating_sub(1),
+            Kind::Word if depth == 0 && is_set_operator(tok) => return Some(idx),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Maximum line width before a SELECT is expanded to multi-line layout.
+const MAX_LINE_WIDTH: usize = 80;
+
+/// Formats a token expression, detecting and properly indenting subqueries like
+/// `(SELECT ...)`. Short subqueries stay on one line; longer ones are expanded
+/// with `(SELECT` on the opening line, body indented, and `)` aligned to the
+/// opening parenthesis.
+fn format_expr_with_subqueries(tokens: &[Token]) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    let mut prev: Option<&Token> = None;
+
+    while i < tokens.len() {
+        if is_subquery_start(tokens, i) {
+            let close = find_matching_paren(tokens, i).unwrap();
+            // Emit space before '(' if needed.
+            // For subqueries, always space after operators and comparison keywords
+            // (IN, EXISTS, etc.) but not after function names like MAX, COUNT.
+            if prev.is_some_and(|p| {
+                matches!(
+                    p.kind,
+                    Kind::Equals
+                        | Kind::GreaterThan
+                        | Kind::LessThan
+                        | Kind::GreaterOrEqual
+                        | Kind::LessOrEqual
+                        | Kind::NotEquals
+                        | Kind::Operator
+                        | Kind::Comma
+                        | Kind::CloseParen
+                ) || (p.kind == Kind::Word
+                    && (p.is_word("IN")
+                        || p.is_word("EXISTS")
+                        || p.is_word("BETWEEN")))
+            }) {
+                result.push(' ');
+            }
+            let inner_tokens = &tokens[i + 1..close];
+            // Compact form: put the entire subquery on one line if the subquery
+            // itself (not the surrounding prefix) fits.
+            let inner_compact = tokens_upper_string(inner_tokens);
+            if inner_compact.chars().count() <= MAX_LINE_WIDTH {
+                result.push_str(&format!("({})", inner_compact));
+            } else {
+                // Multi-line: `(SELECT\n    ...\n    )` with body indented.
+                let inner = format_token_stream(inner_tokens)
+                    .unwrap_or_else(|_| tokens_upper_string(inner_tokens));
+                let inner_lines: Vec<&str> = inner.trim().lines().collect();
+                if let Some((first, rest)) = inner_lines.split_first() {
+                    // First line: `(SELECT ...` on same line as `(`
+                    result.push('(');
+                    result.push_str(first);
+                    result.push('\n');
+                    // Remaining lines: indented by 4 spaces
+                    for line in rest {
+                        result.push_str("    ");
+                        result.push_str(line);
+                        result.push('\n');
+                    }
+                    // Close paren aligned with content
+                    result.push_str("    )");
+                } else {
+                    result.push_str("()");
+                }
+            }
+            i = close + 1;
+            prev = Some(&tokens[close]);
+            continue;
+        }
+
+        let tok = &tokens[i];
+        if let Some(p) = prev {
+            if needs_space(p, tok) {
+                result.push(' ');
+            }
+        }
+        result.push_str(&tok.emit());
+        if tok.is_line_comment() {
+            result.push('\n');
+            prev = None;
+        } else {
+            prev = Some(tok);
+        }
+        i += 1;
+    }
+
+    result
+}
+
+/// Formats a single SELECT body (columns + FROM clause) without UNION handling.
+fn format_single_select(select_tokens: &[Token]) -> String {
+    // If the compact single-line form fits, keep it compact.
+    let compact = tokens_upper_string(select_tokens);
+    if compact.chars().count() <= MAX_LINE_WIDTH {
+        return compact;
+    }
 
     // Parse SELECT columns until FROM
     let from_pos = find_top_level_word(select_tokens, "FROM");
 
     let from_pos = match from_pos {
         Some(p) => p,
-        None => return format!("{} {}", prelude_str, tokens_upper_string(select_tokens)),
+        None => return compact,
     };
 
     let select_cols = &select_tokens[1..from_pos];
@@ -1388,8 +1505,7 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
         max_width
     };
 
-    let mut result = prelude_str;
-    result.push('\n');
+    let mut result = String::new();
     result.push_str("SELECT\n");
 
     for (idx, col_tokens) in columns.iter().enumerate() {
@@ -1401,14 +1517,21 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
             format_view_column(col_tokens)
         } else if let Some(as_pos) = find_as_position(col_tokens) {
             let expr = &col_tokens[..as_pos];
-            let expr_str = tokens_upper_string(expr);
+            let has_subquery = expr.windows(2).any(|w| {
+                w[0].is(Kind::OpenParen) && w[1].is_word("SELECT")
+            });
+            let expr_str = if has_subquery {
+                format_expr_with_subqueries(expr)
+            } else {
+                tokens_upper_string(expr)
+            };
             // `AS` stays a keyword; the alias it introduces is a name.
             let rest_str = tokens_upper_string_trailing_name(&col_tokens[as_pos..]);
-            if is_simple_expression(expr) {
+            if is_simple_expression(expr) && !has_subquery {
                 // Align AS keyword vertically with other simple columns
                 format!("{:width$} {}", expr_str, rest_str, width = max_expr_width)
             } else {
-                // Complex expressions (CONCAT, COALESCE, etc.) just flow naturally
+                // Complex expressions (CONCAT, COALESCE, subqueries, etc.) flow naturally
                 format!("{} {}", expr_str, rest_str)
             }
         } else {
@@ -1426,6 +1549,51 @@ fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
     let rest_tokens = &select_tokens[from_pos..];
     let rest_formatted = format_from_clause_tokens(rest_tokens);
     result.push_str(&rest_formatted);
+
+    result
+}
+
+/// Formats a SELECT body, handling UNION/INTERSECT/EXCEPT by splitting into
+/// independent SELECT parts and joining them with the set operator on its own line.
+fn format_select_body(select_tokens: &[Token]) -> String {
+    // Check for UNION/INTERSECT/EXCEPT at the top level.
+    if let Some(op_pos) = find_set_operator(select_tokens) {
+        let first_part = &select_tokens[..op_pos];
+        let op_token = &select_tokens[op_pos];
+        let rest = &select_tokens[op_pos + 1..];
+
+        // Check for the ALL variant (UNION ALL, INTERSECT ALL, EXCEPT ALL).
+        let has_all = rest.first().is_some_and(|t| t.is_word("ALL"));
+        let (op_text, after_op) = if has_all {
+            (format!("{} ALL", op_token.emit()), &rest[1..])
+        } else {
+            (op_token.emit(), rest)
+        };
+
+        let mut result = format_single_select(first_part);
+        // Ensure the first SELECT ends with a newline before the set operator.
+        if !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&op_text);
+        result.push('\n');
+
+        // Recursively format the rest (which may contain more UNION/INTERSECT/EXCEPT).
+        result.push_str(&format_select_body(after_op));
+        return result;
+    }
+
+    format_single_select(select_tokens)
+}
+
+fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
+    let prelude = &tokens[..select_pos];
+    let select_tokens = &tokens[select_pos..];
+
+    let prelude_str = tokens_upper_string(prelude);
+    let body = format_select_body(select_tokens);
+
+    let mut result = format!("{}\n{}", prelude_str, body);
 
     // Ensure semicolon
     if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) && !result.ends_with(';') {
@@ -1615,7 +1783,7 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                         update_paren_depth(&tokens[i], &mut depth);
                         i += 1;
                     }
-                    let on_part = tokens_upper_string(&tokens[on_start..i]);
+                    let on_part = format_expr_with_subqueries(&tokens[on_start..i]);
                     result.push_str(&on_part);
                 }
                 continue;
@@ -1633,7 +1801,7 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                     update_paren_depth(&tokens[i], &mut depth);
                     i += 1;
                 }
-                result.push_str(&tokens_upper_string(&tokens[start..i]));
+                result.push_str(&format_expr_with_subqueries(&tokens[start..i]));
                 continue;
             } else {
                 result.push_str(&tokens[i].emit());
@@ -1707,6 +1875,45 @@ fn is_delete(tokens: &[Token]) -> bool {
     false
 }
 
+fn is_select(tokens: &[Token]) -> bool {
+    for tok in tokens {
+        if tok.is(Kind::Comment) {
+            continue;
+        }
+        if tok.is(Kind::Word) {
+            let w = tok.text;
+            return w.to_uppercase() == "SELECT";
+        }
+        return false;
+    }
+    false
+}
+
+fn format_select(tokens: &[Token]) -> Result<String, String> {
+    let select_pos = find_top_level_word(tokens, "SELECT");
+    let Some(select_pos) = select_pos else {
+        return format_generic(tokens);
+    };
+
+    // Preserve any leading comments before SELECT.
+    let prelude = &tokens[..select_pos];
+    let select_tokens = &tokens[select_pos..];
+
+    let mut result = String::new();
+    if !prelude.is_empty() {
+        result.push_str(&tokens_upper_string(prelude));
+        result.push(' ');
+    }
+    result.push_str(&format_select_body(select_tokens));
+
+    // Ensure semicolon
+    if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) && !result.ends_with(';') {
+        result.push(';');
+    }
+
+    Ok(result)
+}
+
 fn format_update(tokens: &[Token]) -> String {
     let set_pos = find_top_level_word(tokens, "SET");
 
@@ -1738,7 +1945,7 @@ fn format_update(tokens: &[Token]) -> String {
     let assignments = parse_select_columns(assignments_tokens);
 
     for (i, assign) in assignments.iter().enumerate() {
-        let assign_str = tokens_upper_string(assign);
+        let assign_str = format_expr_with_subqueries(assign);
         if i < assignments.len() - 1 {
             result.push_str(&format!("\n    {},", assign_str));
         } else {
@@ -1751,9 +1958,9 @@ fn format_update(tokens: &[Token]) -> String {
         result.push('\n');
         let remaining = &tokens[wp..];
         let remaining_str = if remaining.last().is_some_and(|t| t.is(Kind::Semicolon)) {
-            tokens_upper_string(&remaining[..remaining.len() - 1])
+            format_expr_with_subqueries(&remaining[..remaining.len() - 1])
         } else {
-            tokens_upper_string(remaining)
+            format_expr_with_subqueries(remaining)
         };
         result.push_str(&remaining_str);
     }
@@ -1780,13 +1987,13 @@ fn format_delete(tokens: &[Token]) -> String {
         result.push('\n');
         let remaining = &tokens[wp..];
         let remaining_str = if remaining.last().is_some_and(|t| t.is(Kind::Semicolon)) {
-            tokens_upper_string(&remaining[..remaining.len() - 1])
+            format_expr_with_subqueries(&remaining[..remaining.len() - 1])
         } else {
-            tokens_upper_string(remaining)
+            format_expr_with_subqueries(remaining)
         };
         result.push_str(&remaining_str);
     } else {
-        result.push_str(&tokens_upper_string(tokens));
+        result.push_str(&format_expr_with_subqueries(tokens));
     }
 
     // Semicolon
@@ -1885,6 +2092,8 @@ fn format_statement(tokens: &[Token]) -> Result<String, String> {
         Ok(format_update(tokens))
     } else if is_delete(tokens) {
         Ok(format_delete(tokens))
+    } else if is_select(tokens) {
+        format_select(tokens)
     } else {
         format_generic(tokens)
     }
