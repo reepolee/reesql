@@ -339,8 +339,14 @@ fn test_unterminated_trigger_body_is_rejected() {
     let (status, stdout, stderr) = run_reesql(input);
 
     assert_eq!(status.code(), Some(1), "expected a clean refusal: {stderr}");
-    assert!(stdout.is_empty(), "nothing should be written on refusal, got: {stdout}");
-    assert!(stderr.contains("missing `END`"), "unexpected error: {stderr}");
+    assert!(
+        stdout.is_empty(),
+        "nothing should be written on refusal, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("missing `END`"),
+        "unexpected error: {stderr}"
+    );
 }
 
 /// Operators used to be dropped by the tokenizer, silently changing what the SQL computed.
@@ -352,8 +358,14 @@ fn test_operators_are_never_dropped() {
         ("select a / b from t;", "SELECT a / b FROM t;"),
         ("select a % b from t;", "SELECT a % b FROM t;"),
         // Both spellings of "not equal" survive as written.
-        ("select * from t where a <> 1;", "SELECT * FROM t WHERE a <> 1;"),
-        ("select * from t where a != 1;", "SELECT * FROM t WHERE a != 1;"),
+        (
+            "select * from t where a <> 1;",
+            "SELECT * FROM t WHERE a <> 1;",
+        ),
+        (
+            "select * from t where a != 1;",
+            "SELECT * FROM t WHERE a != 1;",
+        ),
         // Double-quoted identifiers keep their quotes.
         ("select \"my col\" from t;", "SELECT \"my col\" FROM t;"),
         // A lone `-` must not be mistaken for the start of a comment.
@@ -384,7 +396,10 @@ CREATE TABLE members (
     let (status, stdout, stderr) = run_reesql(input);
 
     assert!(!status.success(), "expected a non-zero exit, got success");
-    assert!(stdout.is_empty(), "nothing should be written on refusal, got: {stdout}");
+    assert!(
+        stdout.is_empty(),
+        "nothing should be written on refusal, got: {stdout}"
+    );
     assert!(
         stderr.contains("<stdin>:1:") && stderr.contains("CREATE"),
         "error should point at line 1 and name the offending token, got: {stderr}"
@@ -396,8 +411,14 @@ fn test_trailing_comma_after_values_is_rejected() {
     let (status, stdout, stderr) = run_reesql("INSERT INTO t (a) VALUES (1),\n");
 
     assert!(!status.success(), "expected a non-zero exit, got success");
-    assert!(stdout.is_empty(), "nothing should be written on refusal, got: {stdout}");
-    assert!(stderr.contains("trailing `,`"), "unexpected error: {stderr}");
+    assert!(
+        stdout.is_empty(),
+        "nothing should be written on refusal, got: {stdout}"
+    );
+    assert!(
+        stderr.contains("trailing `,`"),
+        "unexpected error: {stderr}"
+    );
 }
 
 /// Clauses after the value list used to be dropped silently; they must survive intact.
@@ -428,7 +449,10 @@ fn test_unterminated_values_tuple_is_rejected() {
     let (status, stdout, stderr) = run_reesql("INSERT INTO t VALUES (1,\n");
 
     assert!(!status.success(), "expected a non-zero exit, got success");
-    assert!(stdout.is_empty(), "nothing should be written on refusal, got: {stdout}");
+    assert!(
+        stdout.is_empty(),
+        "nothing should be written on refusal, got: {stdout}"
+    );
     assert!(
         stderr.contains("unterminated VALUES tuple"),
         "unexpected error: {stderr}"
@@ -465,8 +489,15 @@ CREATE TABLE members (
 fn test_unterminated_create_table_is_rejected() {
     let (status, stdout, stderr) = run_reesql("CREATE TABLE members (\n    id INTEGER\n");
 
-    assert_eq!(status.code(), Some(1), "expected a clean refusal, not a panic: {stderr}");
-    assert!(stdout.is_empty(), "nothing should be written on refusal, got: {stdout}");
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "expected a clean refusal, not a panic: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "nothing should be written on refusal, got: {stdout}"
+    );
     assert!(
         stderr.contains("unterminated column list"),
         "unexpected error: {stderr}"
@@ -477,7 +508,10 @@ fn test_unterminated_create_table_is_rejected() {
 #[test]
 fn test_create_table_without_column_list_is_left_alone() {
     for (input, expected) in [
-        ("create table t2 as select * from t1;", "CREATE TABLE t2 AS SELECT * FROM t1;"),
+        (
+            "create table t2 as select * from t1;",
+            "CREATE TABLE t2 AS SELECT * FROM t1;",
+        ),
         ("create table t2 like t1;", "CREATE TABLE t2 LIKE t1;"),
         // Still being typed: pass through rather than invent syntax.
         ("CREATE TABLE members", "CREATE TABLE members"),
@@ -495,7 +529,10 @@ fn test_create_table_without_column_list_is_left_alone() {
 #[test]
 fn test_formatting_only_changes_whitespace_and_case() {
     let squash = |s: &str| -> String {
-        s.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_uppercase()
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_uppercase()
     };
 
     let mut checked = 0;
@@ -606,15 +643,15 @@ fn run_golden_test(name: &str) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let actual = String::from_utf8(output.stdout)
-        .expect("Output is not valid UTF-8");
+    let actual = String::from_utf8(output.stdout).expect("Output is not valid UTF-8");
 
     // Normalize line endings for cross-platform golden file matching
     let expected = expected.replace("\r\n", "\n").replace('\r', "");
     let actual = actual.replace("\r\n", "\n").replace('\r', "");
 
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "\n❌ Test '{}' failed\n{}\nExpected:\n{}───────\nActual:\n{}───────\n",
         name,
         fmt_diff(&expected, &actual),

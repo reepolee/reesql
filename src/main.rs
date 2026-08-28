@@ -7,11 +7,20 @@ use std::sync::LazyLock;
 
 fn display_version() -> String {
     let mut parts = env!("CARGO_PKG_VERSION").split('.');
-    format!("{}.{:02}.{}", parts.next().unwrap_or("0"), parts.next().unwrap_or("0").parse::<u32>().unwrap_or(0), parts.next().unwrap_or("0"))
+    format!(
+        "{}.{:02}.{}",
+        parts.next().unwrap_or("0"),
+        parts.next().unwrap_or("0").parse::<u32>().unwrap_or(0),
+        parts.next().unwrap_or("0")
+    )
 }
 
 #[derive(Parser)]
-#[command(name = "reesql", disable_version_flag = true, about = "MySQL SQL formatter")]
+#[command(
+    name = "reesql",
+    disable_version_flag = true,
+    about = "MySQL SQL formatter"
+)]
 struct Cli {
     #[arg(short = 'v', long = "version", action = clap::ArgAction::SetTrue, help = "Print the bare version number")]
     version: bool,
@@ -27,12 +36,10 @@ fn executable_dir() -> PathBuf {
         std::process::exit(1);
     });
 
-    exe.parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            eprintln!("reesql: executable path has no parent directory");
-            std::process::exit(1);
-        })
+    exe.parent().map(PathBuf::from).unwrap_or_else(|| {
+        eprintln!("reesql: executable path has no parent directory");
+        std::process::exit(1);
+    })
 }
 
 /// What a token is, for spacing and statement-shape decisions. The token's *text* always
@@ -108,155 +115,640 @@ impl<'a> Token<'a> {
 static KEYWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
     [
         // MySQL keywords (original)
-        "ACCESSIBLE", "ADD", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC", "ASENSITIVE",
+        "ACCESSIBLE",
+        "ADD",
+        "ALL",
+        "ALTER",
+        "ANALYZE",
+        "AND",
+        "AS",
+        "ASC",
+        "ASENSITIVE",
         "AUTO_INCREMENT",
-        "BEFORE", "BETWEEN", "BIGINT", "BINARY", "BLOB", "BOTH", "BY", "CALL", "CASCADE",
-        "CASE", "CHANGE", "CHAR", "CHARACTER", "CHECK", "COLLATE", "COLUMN", "COMMENT", "CONDITION",
-        "CONSTRAINT", "CONTINUE", "CONVERT", "CREATE", "CROSS", "CUBE", "CUME_DIST",
-        "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP", "CURRENT_USER", "CURSOR",
-        "DATABASE", "DATABASES", "DAY_HOUR", "DAY_MICROSECOND", "DAY_MINUTE",
-        "DAY_SECOND", "DEC", "DECIMAL", "DECLARE", "DEFAULT", "DELAYED", "DELETE",
-        "DENSE_RANK", "DESC", "DESCRIBE", "DETERMINISTIC", "DISTINCT", "DISTINCTROW",
-        "DIV", "DOUBLE", "DROP", "DUAL", "DUPLICATE", "EACH", "ELSE", "ELSEIF", "EMPTY", "ENCLOSED",
-        "ESCAPED", "EXCEPT", "EXISTS", "EXIT", "EXPLAIN", "FALSE", "FETCH", "FLOAT",
-        "FLOAT4", "FLOAT8", "FOR", "FORCE", "FOREIGN", "FROM", "FULLTEXT", "FUNCTION",
-        "GENERATED", "GET", "GRANT", "GROUP", "GROUPING", "GROUPS", "HAVING",
-        "HIGH_PRIORITY", "HOUR_MICROSECOND", "HOUR_MINUTE", "HOUR_SECOND", "IF",
-        "IGNORE", "IN", "INDEX", "INFILE", "INNER", "INOUT", "INSENSITIVE", "INSERT",
-        "INT", "INT1", "INT2", "INT3", "INT4", "INT8", "INTEGER", "INTERVAL", "INTO",
-        "IS", "ITERATE", "JOIN", "JSON_TABLE", "KEY", "KEYS", "KILL", "LAG", "LATERAL",
-        "LEAD", "LEADING", "LEAVE", "LEFT", "LIKE", "LIMIT", "LINEAR", "LINES",
-        "LOAD", "LOCALTIME", "LOCALTIMESTAMP", "LOCK", "LONG", "LONGBLOB", "LONGTEXT",
-        "LOOP", "LOW_PRIORITY", "MASTER_BIND", "MASTER_SSL_VERIFY_SERVER_CERT",
-        "MATCH", "MAXVALUE", "MEDIUMBLOB", "MEDIUMINT", "MEDIUMTEXT",
-        "MEMBER", "MIDDLEINT", "MINUTE_MICROSECOND", "MINUTE_SECOND", "MOD", "MODIFIES",
-        "NATURAL", "NOT", "NO_WRITE_TO_BINLOG", "NTH_VALUE", "NTILE", "NULL",
-        "NUMERIC", "OF", "ON", "OPTIMIZE", "OPTIMIZER_COSTS", "OPTION", "OPTIONALLY",
-        "OR", "ORDER", "OUT", "OUTER", "OUTFILE", "OVER", "PARTIAL", "PARTITION",
-        "PERCENT_RANK", "PRECISION", "PRIMARY", "PROCEDURE", "PURGE", "RANGE", "RANK",
-        "READ", "READS", "READ_WRITE", "REAL", "RECURSIVE", "REFERENCES", "REGEXP",
-        "RELEASE", "RENAME", "REPEAT", "REPLACE", "REQUIRE", "RESIGNAL", "RESTRICT",
-        "RETURN", "REVOKE", "RIGHT", "RLIKE", "ROW", "ROWS", "ROW_NUMBER",
-        "SCHEMA", "SCHEMAS", "SECOND_MICROSECOND", "SELECT", "SENSITIVE", "SEPARATOR",
-        "SET", "SHOW", "SIGNAL", "SMALLINT", "SPATIAL", "SPECIFIC", "SQL",
-        "SQLEXCEPTION", "SQLSTATE", "SQLWARNING", "SQL_BIG_RESULT",
-        "SQL_CALC_FOUND_ROWS", "SQL_SMALL_RESULT", "SSL", "STARTING", "STORED",
-        "STRAIGHT_JOIN", "SYSTEM", "TABLE", "TERMINATED", "THEN",
-        "TEXT", "TIME", "TIMESTAMP", "TINYBLOB",
-        "TINYINT", "TINYTEXT", "TO", "TRAILING", "TRIGGER", "TRUE", "UNDO", "UNION",
-        "UNIQUE", "UNLOCK", "UNSIGNED", "UPDATE", "USAGE", "USE", "USING",
-        "UTC_DATE", "UTC_TIME", "UTC_TIMESTAMP",
+        "BEFORE",
+        "BETWEEN",
+        "BIGINT",
+        "BINARY",
+        "BLOB",
+        "BOTH",
+        "BY",
+        "CALL",
+        "CASCADE",
+        "CASE",
+        "CHANGE",
+        "CHAR",
+        "CHARACTER",
+        "CHECK",
+        "COLLATE",
+        "COLUMN",
+        "COMMENT",
+        "CONDITION",
+        "CONSTRAINT",
+        "CONTINUE",
+        "CONVERT",
+        "CREATE",
+        "CROSS",
+        "CUBE",
+        "CUME_DIST",
+        "CURRENT_DATE",
+        "CURRENT_TIME",
+        "CURRENT_TIMESTAMP",
+        "CURRENT_USER",
+        "CURSOR",
+        "DATABASE",
+        "DATABASES",
+        "DAY_HOUR",
+        "DAY_MICROSECOND",
+        "DAY_MINUTE",
+        "DAY_SECOND",
+        "DEC",
+        "DECIMAL",
+        "DECLARE",
+        "DEFAULT",
+        "DELAYED",
+        "DELETE",
+        "DENSE_RANK",
+        "DESC",
+        "DESCRIBE",
+        "DETERMINISTIC",
+        "DISTINCT",
+        "DISTINCTROW",
+        "DIV",
+        "DOUBLE",
+        "DROP",
+        "DUAL",
+        "DUPLICATE",
+        "EACH",
+        "ELSE",
+        "ELSEIF",
+        "EMPTY",
+        "ENCLOSED",
+        "ESCAPED",
+        "EXCEPT",
+        "EXISTS",
+        "EXIT",
+        "EXPLAIN",
+        "FALSE",
+        "FETCH",
+        "FLOAT",
+        "FLOAT4",
+        "FLOAT8",
+        "FOR",
+        "FORCE",
+        "FOREIGN",
+        "FROM",
+        "FULLTEXT",
+        "FUNCTION",
+        "GENERATED",
+        "GET",
+        "GRANT",
+        "GROUP",
+        "GROUPING",
+        "GROUPS",
+        "HAVING",
+        "HIGH_PRIORITY",
+        "HOUR_MICROSECOND",
+        "HOUR_MINUTE",
+        "HOUR_SECOND",
+        "IF",
+        "IGNORE",
+        "IN",
+        "INDEX",
+        "INFILE",
+        "INNER",
+        "INOUT",
+        "INSENSITIVE",
+        "INSERT",
+        "INT",
+        "INT1",
+        "INT2",
+        "INT3",
+        "INT4",
+        "INT8",
+        "INTEGER",
+        "INTERVAL",
+        "INTO",
+        "IS",
+        "ITERATE",
+        "JOIN",
+        "JSON_TABLE",
+        "KEY",
+        "KEYS",
+        "KILL",
+        "LAG",
+        "LATERAL",
+        "LEAD",
+        "LEADING",
+        "LEAVE",
+        "LEFT",
+        "LIKE",
+        "LIMIT",
+        "LINEAR",
+        "LINES",
+        "LOAD",
+        "LOCALTIME",
+        "LOCALTIMESTAMP",
+        "LOCK",
+        "LONG",
+        "LONGBLOB",
+        "LONGTEXT",
+        "LOOP",
+        "LOW_PRIORITY",
+        "MASTER_BIND",
+        "MASTER_SSL_VERIFY_SERVER_CERT",
+        "MATCH",
+        "MAXVALUE",
+        "MEDIUMBLOB",
+        "MEDIUMINT",
+        "MEDIUMTEXT",
+        "MEMBER",
+        "MIDDLEINT",
+        "MINUTE_MICROSECOND",
+        "MINUTE_SECOND",
+        "MOD",
+        "MODIFIES",
+        "NATURAL",
+        "NOT",
+        "NO_WRITE_TO_BINLOG",
+        "NTH_VALUE",
+        "NTILE",
+        "NULL",
+        "NUMERIC",
+        "OF",
+        "ON",
+        "OPTIMIZE",
+        "OPTIMIZER_COSTS",
+        "OPTION",
+        "OPTIONALLY",
+        "OR",
+        "ORDER",
+        "OUT",
+        "OUTER",
+        "OUTFILE",
+        "OVER",
+        "PARTIAL",
+        "PARTITION",
+        "PERCENT_RANK",
+        "PRECISION",
+        "PRIMARY",
+        "PROCEDURE",
+        "PURGE",
+        "RANGE",
+        "RANK",
+        "READ",
+        "READS",
+        "READ_WRITE",
+        "REAL",
+        "RECURSIVE",
+        "REFERENCES",
+        "REGEXP",
+        "RELEASE",
+        "RENAME",
+        "REPEAT",
+        "REPLACE",
+        "REQUIRE",
+        "RESIGNAL",
+        "RESTRICT",
+        "RETURN",
+        "REVOKE",
+        "RIGHT",
+        "RLIKE",
+        "ROW",
+        "ROWS",
+        "ROW_NUMBER",
+        "SCHEMA",
+        "SCHEMAS",
+        "SECOND_MICROSECOND",
+        "SELECT",
+        "SENSITIVE",
+        "SEPARATOR",
+        "SET",
+        "SHOW",
+        "SIGNAL",
+        "SMALLINT",
+        "SPATIAL",
+        "SPECIFIC",
+        "SQL",
+        "SQLEXCEPTION",
+        "SQLSTATE",
+        "SQLWARNING",
+        "SQL_BIG_RESULT",
+        "SQL_CALC_FOUND_ROWS",
+        "SQL_SMALL_RESULT",
+        "SSL",
+        "STARTING",
+        "STORED",
+        "STRAIGHT_JOIN",
+        "SYSTEM",
+        "TABLE",
+        "TERMINATED",
+        "THEN",
+        "TEXT",
+        "TIME",
+        "TIMESTAMP",
+        "TINYBLOB",
+        "TINYINT",
+        "TINYTEXT",
+        "TO",
+        "TRAILING",
+        "TRIGGER",
+        "TRUE",
+        "UNDO",
+        "UNION",
+        "UNIQUE",
+        "UNLOCK",
+        "UNSIGNED",
+        "UPDATE",
+        "USAGE",
+        "USE",
+        "USING",
+        "UTC_DATE",
+        "UTC_TIME",
+        "UTC_TIMESTAMP",
         "VALUES",
-        "VARBINARY", "VARCHAR",
-        "VARCHARACTER", "VARYING", "VIRTUAL", "VIEW",
+        "VARBINARY",
+        "VARCHAR",
+        "VARCHARACTER",
+        "VARYING",
+        "VIRTUAL",
+        "VIEW",
         "YEAR",
-        "WHEN", "WHERE", "WHILE",
-        "WINDOW", "WITH", "WRITE", "XOR", "YEAR_MONTH",
+        "WHEN",
+        "WHERE",
+        "WHILE",
+        "WINDOW",
+        "WITH",
+        "WRITE",
+        "XOR",
+        "YEAR_MONTH",
         // Common data types
-        "BIT", "BOOL", "BOOLEAN", "DATETIME", "DATE", "ENUM", "JSON", "SERIAL",
+        "BIT",
+        "BOOL",
+        "BOOLEAN",
+        "DATETIME",
+        "DATE",
+        "ENUM",
+        "JSON",
+        "SERIAL",
         "ZEROFILL",
         // Common functions to uppercase
-        "CONCAT_WS", "IFNULL", "COALESCE", "NOW",
-
+        "CONCAT_WS",
+        "IFNULL",
+        "COALESCE",
+        "NOW",
         // ===== SQLite-specific keywords =====
-        "ABORT", "ATTACH", "AUTOINCREMENT", "CONFLICT", "DETACH",
-        "EXCLUSIVE", "FAIL", "IGNORE", "IMMEDIATE", "INDEXED",
-        "INSTEAD", "OID", "PLAN", "PRAGMA", "QUERY",
-        "RAISE", "REINDEX", "ROLLBACK", "ROWID", "SAVEPOINT",
-        "VACUUM", "WITHOUT",
+        "ABORT",
+        "ATTACH",
+        "AUTOINCREMENT",
+        "CONFLICT",
+        "DETACH",
+        "EXCLUSIVE",
+        "FAIL",
+        "IGNORE",
+        "IMMEDIATE",
+        "INDEXED",
+        "INSTEAD",
+        "OID",
+        "PLAN",
+        "PRAGMA",
+        "QUERY",
+        "RAISE",
+        "REINDEX",
+        "ROLLBACK",
+        "ROWID",
+        "SAVEPOINT",
+        "VACUUM",
+        "WITHOUT",
         // SQLite types
-        "INT", "INTEGER", "TEXT", "REAL", "BLOB", "NUMERIC",
+        "INT",
+        "INTEGER",
+        "TEXT",
+        "REAL",
+        "BLOB",
+        "NUMERIC",
         // SQLite functions
-        "ABS", "CHANGES", "CHAR", "GLOB", "HEX",
-        "INSTR", "LAST_INSERT_ROWID", "LENGTH", "LIKELIHOOD", "LIKELY",
-        "LOWER", "LTRIM", "MAX", "MIN", "NULLIF",
-        "PRINTF", "QUOTE", "RANDOM", "RANDOMBLOB",
-        "ROUND", "RTRIM", "SIGN", "SUBSTR", "SUBSTRING",
-        "TRIM", "TYPEOF", "UNICODE", "UNLIKELY",
-        "UPPER", "ZEROBLOB",
-        // SQLite pragmas / misc
-        "ANALYZE", "COMMIT", "END", "TRANSACTION", "BEGIN",
-        "DEALLOCATE", "PREPARE", "EXECUTE", "NOTHING",
-
-        // ===== PostgreSQL-specific keywords =====
-        "ADMIN", "AFTER", "AGGREGATE", "ALSO", "ARRAY",
-        "ASSERTION", "ASSIGNMENT", "ASYMMETRIC", "AT", "AUTHORIZATION",
-        "BEFORE",
-        "CACHE", "CALL", "CALLED", "CATALOG", "CHAIN",
-        "CHECKPOINT", "CLASS", "CLOSE", "CLUSTER",
-        "COMMENTS", "COMMIT", "COMMITTED", "CONCURRENTLY", "CONFIGURATION",
-        "CONNECTION", "CONTENT", "CONTENTS", "CONVERSION", "COPY",
-        "COST", "CSV", "CURRENT_CATALOG", "CURRENT_ROLE", "CURRENT_SCHEMA",
-        "CYCLE",
-        "DAY", "DEALLOCATE", "DEFAULTS", "DEFERRABLE",
-        "DEFERRED", "DEFINER", "DELIMITER", "DELIMITERS", "DEPENDS",
-        "DICTIONARY", "DISABLE", "DISCARD", "DO", "DOCUMENT",
-        "DOMAIN",
-        "ENABLE", "ENCODING", "ENCRYPTED", "ENUM", "ESCAPE",
-        "EVENT", "EXCLUDE", "EXCLUDING", "EXECUTE",
-        "EXTENSION", "EXTERNAL",
-        "FAMILY", "FETCH", "FILTER", "FIRST", "FLOOR",
-        "FOLLOWING", "FORCE", "FORMAT", "FORWARD", "FREEZE",
-        "FUNCTIONS",
-        "GLOBAL", "GRANTED", "GREATEST",
-        "HANDLER", "HEADER",
-        "HOLD", "HOUR",
-        "IDENTITY", "ILIKE", "IMMUTABLE", "IMPLICIT", "IMPORT",
-        "INCLUDING", "INCREMENT", "INDEXES", "INHERIT", "INHERITS",
-        "INLINE", "INPUT", "INVOKER", "ISOLATION",
-        "ISNULL",
-        "LABEL", "LANGUAGE", "LARGE", "LAST", "LEAKPROOF",
-        "LEAST", "LEVEL", "LISTEN", "LOCAL", "LOCATION",
-        "LOCKED", "LOGGED",
-        "MAPPING", "MATERIALIZED", "METHOD", "MINUTE", "MINVALUE",
-        "MONTH", "MOVE",
-        "NAMES", "NATIONAL", "NCHAR",
-        "NEXT", "NONE", "NOTHING", "NOTIFY", "NOTNULL",
-        "NOWAIT", "NULLS",
-        "OBJECT", "OFF", "OIDS", "ONLY",
-        "OPERATOR", "OPTION", "OPTIONS", "ORDINALITY", "OTHERS",
-        "OVERLAY", "OWNED", "OWNER",
-        "PARALLEL", "PARSER", "PARTITION", "PARTITIONS", "PASSING",
-        "PASSWORD", "PLACING", "PLANS", "POLICY", "POSITION",
-        "PRECEDING", "PRESERVE", "PREPARE", "PREPARED", "PRIOR",
-        "PRIVILEGES", "PROCEDURAL", "PROCEDURES", "PROGRAM", "PUBLICATION",
+        "ABS",
+        "CHANGES",
+        "CHAR",
+        "GLOB",
+        "HEX",
+        "INSTR",
+        "LAST_INSERT_ROWID",
+        "LENGTH",
+        "LIKELIHOOD",
+        "LIKELY",
+        "LOWER",
+        "LTRIM",
+        "MAX",
+        "MIN",
+        "NULLIF",
+        "PRINTF",
         "QUOTE",
-        "RANGE", "REASSIGN", "RECHECK", "REF", "REFERENCING",
-        "REINDEX", "RELATIVE", "RELEASE", "REPEATABLE", "REPLICA",
-        "RESET", "RESTART", "RESTRICT", "RETURNING", "RETURNS",
-        "ROLLUP", "ROUTINE", "ROUTINES",
+        "RANDOM",
+        "RANDOMBLOB",
+        "ROUND",
+        "RTRIM",
+        "SIGN",
+        "SUBSTR",
+        "SUBSTRING",
+        "TRIM",
+        "TYPEOF",
+        "UNICODE",
+        "UNLIKELY",
+        "UPPER",
+        "ZEROBLOB",
+        // SQLite pragmas / misc
+        "ANALYZE",
+        "COMMIT",
+        "END",
+        "TRANSACTION",
+        "BEGIN",
+        "DEALLOCATE",
+        "PREPARE",
+        "EXECUTE",
+        "NOTHING",
+        // ===== PostgreSQL-specific keywords =====
+        "ADMIN",
+        "AFTER",
+        "AGGREGATE",
+        "ALSO",
+        "ARRAY",
+        "ASSERTION",
+        "ASSIGNMENT",
+        "ASYMMETRIC",
+        "AT",
+        "AUTHORIZATION",
+        "BEFORE",
+        "CACHE",
+        "CALL",
+        "CALLED",
+        "CATALOG",
+        "CHAIN",
+        "CHECKPOINT",
+        "CLASS",
+        "CLOSE",
+        "CLUSTER",
+        "COMMENTS",
+        "COMMIT",
+        "COMMITTED",
+        "CONCURRENTLY",
+        "CONFIGURATION",
+        "CONNECTION",
+        "CONTENT",
+        "CONTENTS",
+        "CONVERSION",
+        "COPY",
+        "COST",
+        "CSV",
+        "CURRENT_CATALOG",
+        "CURRENT_ROLE",
+        "CURRENT_SCHEMA",
+        "CYCLE",
+        "DAY",
+        "DEALLOCATE",
+        "DEFAULTS",
+        "DEFERRABLE",
+        "DEFERRED",
+        "DEFINER",
+        "DELIMITER",
+        "DELIMITERS",
+        "DEPENDS",
+        "DICTIONARY",
+        "DISABLE",
+        "DISCARD",
+        "DO",
+        "DOCUMENT",
+        "DOMAIN",
+        "ENABLE",
+        "ENCODING",
+        "ENCRYPTED",
+        "ENUM",
+        "ESCAPE",
+        "EVENT",
+        "EXCLUDE",
+        "EXCLUDING",
+        "EXECUTE",
+        "EXTENSION",
+        "EXTERNAL",
+        "FAMILY",
+        "FETCH",
+        "FILTER",
+        "FIRST",
+        "FLOOR",
+        "FOLLOWING",
+        "FORCE",
+        "FORMAT",
+        "FORWARD",
+        "FREEZE",
+        "FUNCTIONS",
+        "GLOBAL",
+        "GRANTED",
+        "GREATEST",
+        "HANDLER",
+        "HEADER",
+        "HOLD",
+        "HOUR",
+        "IDENTITY",
+        "ILIKE",
+        "IMMUTABLE",
+        "IMPLICIT",
+        "IMPORT",
+        "INCLUDING",
+        "INCREMENT",
+        "INDEXES",
+        "INHERIT",
+        "INHERITS",
+        "INLINE",
+        "INPUT",
+        "INVOKER",
+        "ISOLATION",
+        "ISNULL",
+        "LABEL",
+        "LANGUAGE",
+        "LARGE",
+        "LAST",
+        "LEAKPROOF",
+        "LEAST",
+        "LEVEL",
+        "LISTEN",
+        "LOCAL",
+        "LOCATION",
+        "LOCKED",
+        "LOGGED",
+        "MAPPING",
+        "MATERIALIZED",
+        "METHOD",
+        "MINUTE",
+        "MINVALUE",
+        "MONTH",
+        "MOVE",
+        "NAMES",
+        "NATIONAL",
+        "NCHAR",
+        "NEXT",
+        "NONE",
+        "NOTHING",
+        "NOTIFY",
+        "NOTNULL",
+        "NOWAIT",
+        "NULLS",
+        "OBJECT",
+        "OFF",
+        "OIDS",
+        "ONLY",
+        "OPERATOR",
+        "OPTION",
+        "OPTIONS",
+        "ORDINALITY",
+        "OTHERS",
+        "OVERLAY",
+        "OWNED",
+        "OWNER",
+        "PARALLEL",
+        "PARSER",
+        "PARTITION",
+        "PARTITIONS",
+        "PASSING",
+        "PASSWORD",
+        "PLACING",
+        "PLANS",
+        "POLICY",
+        "POSITION",
+        "PRECEDING",
+        "PRESERVE",
+        "PREPARE",
+        "PREPARED",
+        "PRIOR",
+        "PRIVILEGES",
+        "PROCEDURAL",
+        "PROCEDURES",
+        "PROGRAM",
+        "PUBLICATION",
+        "QUOTE",
+        "RANGE",
+        "REASSIGN",
+        "RECHECK",
+        "REF",
+        "REFERENCING",
+        "REINDEX",
+        "RELATIVE",
+        "RELEASE",
+        "REPEATABLE",
+        "REPLICA",
+        "RESET",
+        "RESTART",
+        "RESTRICT",
+        "RETURNING",
+        "RETURNS",
+        "ROLLUP",
+        "ROUTINE",
+        "ROUTINES",
         "RULE",
-        "SAVEPOINT", "SCROLL", "SEARCH", "SECOND", "SECURITY",
-        "SEQUENCE", "SEQUENCES", "SERIALIZABLE", "SERVER", "SESSION",
-        "SHARE", "SIMILAR", "SIMPLE", "SKIP", "SNAPSHOT",
-        "SOME", "SPECIFICTYPE", "STANDALONE", "STATEMENT",
-        "STATISTICS", "STDIN", "STDOUT", "STORAGE", "STRICT",
-        "STRIP", "SUBSCRIPTION", "SUPPORT", "SYMMETRIC", "SYSID",
-        "TABLES", "TABLESAMPLE", "TABLESPACE", "TEMP", "TEMPORARY",
-        "THAN", "TIES", "TRANSACTION", "TRANSFORM", "TREAT",
-        "TRUNCATE", "TRUSTED", "TYPE", "TYPES",
-        "UNBOUNDED", "UNCOMMITTED", "UNENCRYPTED", "UNKNOWN", "UNLISTEN",
-        "UNLOGGED", "UNTIL",
-        "VACUUM", "VALID", "VALIDATE", "VALIDATOR",
-        "VARIADIC", "VERBOSE", "VIEWS", "VOLATILE",
-        "WHITESPACE", "WITHIN", "WORK", "WRAPPER",
-        "XMLAGG", "XMLATTRIBUTES", "XMLCONCAT", "XMLELEMENT",
-        "XMLFOREST", "XMLNAMESPACES", "XMLPARSE", "XMLPI", "XMLROOT",
-        "XMLSERIALIZE", "XMLTABLE",
+        "SAVEPOINT",
+        "SCROLL",
+        "SEARCH",
+        "SECOND",
+        "SECURITY",
+        "SEQUENCE",
+        "SEQUENCES",
+        "SERIALIZABLE",
+        "SERVER",
+        "SESSION",
+        "SHARE",
+        "SIMILAR",
+        "SIMPLE",
+        "SKIP",
+        "SNAPSHOT",
+        "SOME",
+        "SPECIFICTYPE",
+        "STANDALONE",
+        "STATEMENT",
+        "STATISTICS",
+        "STDIN",
+        "STDOUT",
+        "STORAGE",
+        "STRICT",
+        "STRIP",
+        "SUBSCRIPTION",
+        "SUPPORT",
+        "SYMMETRIC",
+        "SYSID",
+        "TABLES",
+        "TABLESAMPLE",
+        "TABLESPACE",
+        "TEMP",
+        "TEMPORARY",
+        "THAN",
+        "TIES",
+        "TRANSACTION",
+        "TRANSFORM",
+        "TREAT",
+        "TRUNCATE",
+        "TRUSTED",
+        "TYPE",
+        "TYPES",
+        "UNBOUNDED",
+        "UNCOMMITTED",
+        "UNENCRYPTED",
+        "UNKNOWN",
+        "UNLISTEN",
+        "UNLOGGED",
+        "UNTIL",
+        "VACUUM",
+        "VALID",
+        "VALIDATE",
+        "VALIDATOR",
+        "VARIADIC",
+        "VERBOSE",
+        "VIEWS",
+        "VOLATILE",
+        "WHITESPACE",
+        "WITHIN",
+        "WORK",
+        "WRAPPER",
+        "XMLAGG",
+        "XMLATTRIBUTES",
+        "XMLCONCAT",
+        "XMLELEMENT",
+        "XMLFOREST",
+        "XMLNAMESPACES",
+        "XMLPARSE",
+        "XMLPI",
+        "XMLROOT",
+        "XMLSERIALIZE",
+        "XMLTABLE",
         "YES",
         "ZONE",
         // PostgreSQL types
-        "BIGSERIAL", "SMALLSERIAL", "SERIAL", "SERIAL2", "SERIAL4", "SERIAL8",
-        "UUID", "CIDR", "INET", "MACADDR",
-        "BYTEA", "MONEY", "MACADDR8",
-        "INTERVAL", "TIMETZ", "TIMESTAMPTZ",
+        "BIGSERIAL",
+        "SMALLSERIAL",
+        "SERIAL",
+        "SERIAL2",
+        "SERIAL4",
+        "SERIAL8",
+        "UUID",
+        "CIDR",
+        "INET",
+        "MACADDR",
+        "BYTEA",
+        "MONEY",
+        "MACADDR8",
+        "INTERVAL",
+        "TIMETZ",
+        "TIMESTAMPTZ",
         // PostgreSQL functions
-        "ARRAY_AGG", "STRING_AGG",
+        "ARRAY_AGG",
+        "STRING_AGG",
         "JSONB_BUILD_OBJECT",
-        "JSONB_AGG", "TO_JSONB",
-        "EXTRACT", "DATE_TRUNC", "STATEMENT_TIMESTAMP",
+        "JSONB_AGG",
+        "TO_JSONB",
+        "EXTRACT",
+        "DATE_TRUNC",
+        "STATEMENT_TIMESTAMP",
         "CLOCK_TIMESTAMP",
-        "FIRST_VALUE", "LAST_VALUE", "NTH_VALUE",
+        "FIRST_VALUE",
+        "LAST_VALUE",
+        "NTH_VALUE",
         "SPLIT_PART",
     ]
     .iter()
@@ -267,8 +759,18 @@ static KEYWORDS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
 // Words that mark the start of constraints in a column definition
 static CONSTRAINT_STARTS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
     [
-        "NOT", "NULL", "DEFAULT", "AUTO_INCREMENT", "PRIMARY", "UNIQUE",
-        "REFERENCES", "CHECK", "ON", "COMMENT", "COLLATE", "GENERATED",
+        "NOT",
+        "NULL",
+        "DEFAULT",
+        "AUTO_INCREMENT",
+        "PRIMARY",
+        "UNIQUE",
+        "REFERENCES",
+        "CHECK",
+        "ON",
+        "COMMENT",
+        "COLLATE",
+        "GENERATED",
     ]
     .iter()
     .copied()
@@ -277,8 +779,15 @@ static CONSTRAINT_STARTS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
 
 static TABLE_CONSTRAINT_STARTS: LazyLock<HashSet<&str>> = LazyLock::new(|| {
     [
-        "UNIQUE", "PRIMARY", "FOREIGN", "CHECK", "INDEX", "KEY", "CONSTRAINT",
-        "FULLTEXT", "SPATIAL",
+        "UNIQUE",
+        "PRIMARY",
+        "FOREIGN",
+        "CHECK",
+        "INDEX",
+        "KEY",
+        "CONSTRAINT",
+        "FULLTEXT",
+        "SPATIAL",
     ]
     .iter()
     .copied()
@@ -346,13 +855,34 @@ fn tokenize(input: &str) -> Vec<Token<'_>> {
         // Each arm advances `i` past the token and names its kind; the text is then taken
         // from the source. No arm builds text of its own.
         let kind = match c {
-            '(' => { i += 1; Some(Kind::OpenParen) }
-            ')' => { i += 1; Some(Kind::CloseParen) }
-            ',' => { i += 1; Some(Kind::Comma) }
-            ';' => { i += 1; Some(Kind::Semicolon) }
-            '=' => { i += 1; Some(Kind::Equals) }
-            '.' => { i += 1; Some(Kind::Dot) }
-            '*' => { i += 1; Some(Kind::Star) }
+            '(' => {
+                i += 1;
+                Some(Kind::OpenParen)
+            }
+            ')' => {
+                i += 1;
+                Some(Kind::CloseParen)
+            }
+            ',' => {
+                i += 1;
+                Some(Kind::Comma)
+            }
+            ';' => {
+                i += 1;
+                Some(Kind::Semicolon)
+            }
+            '=' => {
+                i += 1;
+                Some(Kind::Equals)
+            }
+            '.' => {
+                i += 1;
+                Some(Kind::Dot)
+            }
+            '*' => {
+                i += 1;
+                Some(Kind::Star)
+            }
             '>' => {
                 if chars.get(i + 1) == Some(&'>') {
                     // Right shift.
@@ -607,15 +1137,28 @@ fn needs_space(prev: &Token, tok: &Token) -> bool {
         (Word, Equals) | (Equals, Word) | (Equals, OpenParen) => true,
         (CloseParen, Word) | (Comma, Word) => true,
         // Space between IN/EXISTS/BETWEEN and their opening paren.
-        (Word, OpenParen) if prev.is_word("IN") || prev.is_word("EXISTS") || prev.is_word("BETWEEN") => true,
+        (Word, OpenParen)
+            if prev.is_word("IN") || prev.is_word("EXISTS") || prev.is_word("BETWEEN") =>
+        {
+            true
+        }
         (Word, Star) | (Star, Word) => true,
         // Keep a comment off the token it trails.
         (Word | Star | CloseParen | Comma, Comment) => true,
         // Binary operators are spaced on both sides.
-        (Word, GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator) => true,
-        (GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator, Word) => true,
+        (
+            Word,
+            GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator,
+        ) => true,
+        (
+            GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat | Operator,
+            Word,
+        ) => true,
         (CloseParen, Operator) => true,
-        (CloseParen, GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat) => true,
+        (
+            CloseParen,
+            GreaterThan | LessThan | GreaterOrEqual | LessOrEqual | NotEquals | Concat,
+        ) => true,
         // A closing bracket separates from what follows, like a closing paren does.
         (Symbol, Word) if prev.text == "]" => true,
         // Detach a symbol from a preceding word (`SET @x`), but never split a bracketed
@@ -892,7 +1435,9 @@ fn split_top_level_commas<'a>(tokens: &'a [Token<'a>]) -> Vec<&'a [Token<'a>]> {
     pieces
 }
 
-fn parse_column_defs<'a>(inner_tokens: &'a [Token<'a>]) -> (Vec<ColumnDef<'a>>, Vec<&'a [Token<'a>]>) {
+fn parse_column_defs<'a>(
+    inner_tokens: &'a [Token<'a>],
+) -> (Vec<ColumnDef<'a>>, Vec<&'a [Token<'a>]>) {
     let mut columns = Vec::new();
     let mut table_constraints = Vec::new();
 
@@ -990,7 +1535,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
 
         let Some(close_pos) = close_pos else {
             return Err(
-                "this CREATE TABLE has an unterminated column list: missing `)`".to_string()
+                "this CREATE TABLE has an unterminated column list: missing `)`".to_string(),
             );
         };
 
@@ -1030,8 +1575,6 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
                         name_padded, type_padded, constraint_str
                     ));
                 }
-
-
             }
         }
 
@@ -1045,7 +1588,9 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
         }
 
         let mut trailing_tokens = &tokens[close_pos + 1..];
-        let has_trailing_semi = trailing_tokens.last().is_some_and(|t| t.is(Kind::Semicolon));
+        let has_trailing_semi = trailing_tokens
+            .last()
+            .is_some_and(|t| t.is(Kind::Semicolon));
         if has_trailing_semi {
             trailing_tokens = &trailing_tokens[..trailing_tokens.len() - 1];
         }
@@ -1216,9 +1761,7 @@ fn format_create_index(tokens: &[Token]) -> String {
 /// Lays out `CREATE TRIGGER ... BEGIN <body> END;` with the header and `BEGIN` on one line,
 /// each body statement formatted normally and indented, and `END;` on its own line.
 fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
-    let begin_idx = tokens
-        .iter()
-        .position(|t| t.is_word("BEGIN"));
+    let begin_idx = tokens.iter().position(|t| t.is_word("BEGIN"));
 
     // No body block to lay out (or one not yet typed): keep every token as-is.
     let Some(begin_idx) = begin_idx else {
@@ -1333,9 +1876,7 @@ fn find_as_position(tokens: &[Token]) -> Option<usize> {
 /// Returns true if the tokens represent a simple column expression (just identifiers and dots),
 /// meaning it should participate in AS-alignment width calculation.
 fn is_simple_expression(tokens: &[Token]) -> bool {
-    tokens
-        .iter()
-        .all(|t| t.is(Kind::Word) || t.is(Kind::Dot))
+    tokens.iter().all(|t| t.is(Kind::Word) || t.is(Kind::Dot))
 }
 
 /// Finds a keyword outside parenthesized expressions. A view's SELECT list can contain
@@ -1409,9 +1950,7 @@ fn format_expr_with_subqueries(tokens: &[Token]) -> String {
                         | Kind::Comma
                         | Kind::CloseParen
                 ) || (p.kind == Kind::Word
-                    && (p.is_word("IN")
-                        || p.is_word("EXISTS")
-                        || p.is_word("BETWEEN")))
+                    && (p.is_word("IN") || p.is_word("EXISTS") || p.is_word("BETWEEN")))
             }) {
                 result.push(' ');
             }
@@ -1517,9 +2056,9 @@ fn format_single_select(select_tokens: &[Token]) -> String {
             format_view_column(col_tokens)
         } else if let Some(as_pos) = find_as_position(col_tokens) {
             let expr = &col_tokens[..as_pos];
-            let has_subquery = expr.windows(2).any(|w| {
-                w[0].is(Kind::OpenParen) && w[1].is_word("SELECT")
-            });
+            let has_subquery = expr
+                .windows(2)
+                .any(|w| w[0].is(Kind::OpenParen) && w[1].is_word("SELECT"));
             let expr_str = if has_subquery {
                 format_expr_with_subqueries(expr)
             } else {
@@ -1710,8 +2249,7 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                 let start = i;
                 let mut depth = 0usize;
                 while i < tokens.len() {
-                    if depth == 0
-                        && (is_join_start(&tokens[i]) || is_query_tail_start(&tokens[i]))
+                    if depth == 0 && (is_join_start(&tokens[i]) || is_query_tail_start(&tokens[i]))
                     {
                         break;
                     }
@@ -1736,9 +2274,11 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                         i += 1;
                         break;
                     }
-                    if ["LEFT", "RIGHT", "INNER", "CROSS", "NATURAL", "FULL", "OUTER"]
-                        .iter()
-                        .any(|word| tokens[i].is_word(word))
+                    if [
+                        "LEFT", "RIGHT", "INNER", "CROSS", "NATURAL", "FULL", "OUTER",
+                    ]
+                    .iter()
+                    .any(|word| tokens[i].is_word(word))
                     {
                         i += 1;
                         continue;
@@ -2130,7 +2670,7 @@ fn format_token_stream(tokens: &[Token]) -> Result<String, FormatError> {
     let statements = split_statements(tokens);
 
     let mut result = String::new();
-    let mut prev_type: Option<String> = None;
+    let mut has_previous_statement = false;
 
     for stmt in &statements {
         let toks = stmt.tokens;
@@ -2146,22 +2686,16 @@ fn format_token_stream(tokens: &[Token]) -> Result<String, FormatError> {
             continue;
         }
 
-        // Statements of a different kind than the previous one get a blank line before them.
-        let current_type = toks
-            .iter()
-            .filter(|t| t.is(Kind::Word))
-            .take(2)
-            .map(|t| t.text.to_uppercase())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        if prev_type.as_ref().is_some_and(|prev| *prev != current_type) {
+        // Separate every statement from the next one with a blank line. This is based on
+        // the actual statement boundary rather than its leading keywords, so consecutive
+        // statements of the same type remain readable too.
+        if has_previous_statement {
             result.push('\n');
         }
 
         result.push_str(&formatted);
         result.push('\n');
-        prev_type = Some(current_type);
+        has_previous_statement = true;
     }
 
     Ok(result)

@@ -8,12 +8,14 @@ CREATE TABLE tournament (
     date       TEXT    NULL DEFAULT '',
     rounds     INTEGER NULL DEFAULT 3
 );
+
 CREATE TABLE tables (
     id    INTEGER NULL PRIMARY KEY AUTOINCREMENT,
     title TEXT    NULL DEFAULT ''
 );
 
 INSERT INTO tables (title) VALUES ('table_1');
+
 INSERT INTO tournament (id, location, location_2, date) VALUES (1,'a','b','c');
 
 -- The same words in keyword position still upper-case.
