@@ -12,6 +12,13 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Added
+
+- `--unwrap-joins` flag: rewrites mysqldump's redundant parentheses around a view's join
+  chain (`FROM ((a LEFT JOIN b ON((...))) LEFT JOIN c ON((...)))`) into the hand-written
+  form (`FROM a LEFT JOIN b ON(...) LEFT JOIN c ON(...)`). Opt-in, so the default
+  formatting still preserves every character.
+
 ### Fixed
 
 - `CREATE VIEW` statements exported by mysqldump with `ALGORITHM = ...`, `DEFINER = ...`,

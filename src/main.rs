@@ -27,6 +27,13 @@ struct Cli {
 
     #[arg(long = "where", action = clap::ArgAction::SetTrue)]
     where_: bool,
+
+    /// mysqldump wraps a view's join chain in redundant parentheses
+    /// (`FROM ((a LEFT JOIN b ON((...))) LEFT JOIN c ON((...)))`). With this flag,
+    /// reesql rewrites them into the hand-written form (`FROM a LEFT JOIN b ON(...)
+    /// LEFT JOIN c ON(...)`). Opt-in: without it, every character is preserved exactly.
+    #[arg(long = "unwrap-joins", action = clap::ArgAction::SetTrue)]
+    unwrap_joins: bool,
     file: Option<String>,
 }
 
@@ -1584,14 +1591,14 @@ fn split_type_and_constraints<'a>(tokens: &'a [Token<'a>]) -> (&'a [Token<'a>], 
     (tokens, &[])
 }
 
-fn format_create_table(tokens: &[Token]) -> Result<String, String> {
+fn format_create_table(tokens: &[Token], unwrap_joins: bool) -> Result<String, String> {
     // Find opening paren position
     let open_paren_pos = tokens.iter().position(|t| t.is(Kind::OpenParen));
 
     // No column list: CREATE TABLE ... AS SELECT / LIKE, or a definition still being typed.
     // Emitting the column-list layout here would append a `(` that is not in the source.
     let Some(paren_pos) = open_paren_pos else {
-        return format_generic(tokens);
+        return format_generic(tokens, unwrap_joins);
     };
 
     // In CREATE TABLE ... AS SELECT / LIKE, a later parenthesis belongs to the query or
@@ -1601,7 +1608,7 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
         .filter_map(|word| find_top_level_word(tokens, word))
         .any(|clause_pos| clause_pos < paren_pos)
     {
-        return format_generic(tokens);
+        return format_generic(tokens, unwrap_joins);
     }
 
     let mut result = String::new();
@@ -1707,11 +1714,11 @@ fn format_create_table(tokens: &[Token]) -> Result<String, String> {
     Ok(result)
 }
 
-fn format_insert(tokens: &[Token]) -> Result<String, String> {
+fn format_insert(tokens: &[Token], unwrap_joins: bool) -> Result<String, String> {
     let values_pos = find_top_level_word(tokens, "VALUES");
 
     let Some(values_idx) = values_pos else {
-        return Ok(format_expr_with_subqueries(tokens));
+        return Ok(format_expr_with_subqueries(tokens, unwrap_joins));
     };
 
     let prelude = &tokens[..=values_idx];
@@ -1857,12 +1864,12 @@ fn format_create_index(tokens: &[Token]) -> String {
 
 /// Lays out `CREATE TRIGGER ... BEGIN <body> END;` with the header and `BEGIN` on one line,
 /// each body statement formatted normally and indented, and `END;` on its own line.
-fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
+fn format_create_trigger(tokens: &[Token], unwrap_joins: bool) -> Result<String, String> {
     let begin_idx = tokens.iter().position(|t| t.is_word("BEGIN"));
 
     // No body block to lay out (or one not yet typed): keep every token as-is.
     let Some(begin_idx) = begin_idx else {
-        return format_generic(tokens);
+        return format_generic(tokens, unwrap_joins);
     };
 
     let mut depth = 1isize;
@@ -1886,7 +1893,7 @@ fn format_create_trigger(tokens: &[Token]) -> Result<String, String> {
     result.push('\n');
 
     for stmt in split_trigger_body(&tokens[begin_idx + 1..end_idx]) {
-        let formatted = format_statement(stmt)?;
+        let formatted = format_statement(stmt, unwrap_joins)?;
         for line in formatted.lines() {
             if line.is_empty() {
                 result.push('\n');
@@ -2023,7 +2030,7 @@ const MAX_LINE_WIDTH: usize = 80;
 /// `(SELECT ...)`. Short subqueries stay on one line; longer ones are expanded
 /// with `(SELECT` on the opening line, body indented, and `)` aligned to the
 /// opening parenthesis.
-fn format_expr_with_subqueries(tokens: &[Token]) -> String {
+fn format_expr_with_subqueries(tokens: &[Token], unwrap_joins: bool) -> String {
     let mut result = String::new();
     let mut i = 0;
     let mut prev: Option<&Token> = None;
@@ -2059,7 +2066,7 @@ fn format_expr_with_subqueries(tokens: &[Token]) -> String {
                 result.push_str(&format!("({})", inner_compact));
             } else {
                 // Multi-line: `(SELECT\n    ...\n    )` with body indented.
-                let inner = format_token_stream(inner_tokens)
+                let inner = format_token_stream(inner_tokens, unwrap_joins)
                     .unwrap_or_else(|_| tokens_upper_string(inner_tokens));
                 let inner_lines: Vec<&str> = inner.trim().lines().collect();
                 if let Some((first, rest)) = inner_lines.split_first() {
@@ -2104,9 +2111,16 @@ fn format_expr_with_subqueries(tokens: &[Token]) -> String {
 }
 
 /// Formats a single SELECT body (columns + FROM clause) without UNION handling.
-fn format_single_select(select_tokens: &[Token]) -> String {
+fn format_single_select(select_tokens: &[Token], unwrap_joins: bool) -> String {
     // If the compact single-line form fits, keep it compact.
-    let compact = tokens_upper_string(select_tokens);
+    let compact = if unwrap_joins && has_export_join_chain(select_tokens) {
+        // mysqldump's join parens are dropped even when the statement stays on one line;
+        // the unwrap only touches parens that wrap join chains, so anything else passes
+        // through untouched.
+        tokens_upper_string(&unwrap_export_joins(select_tokens))
+    } else {
+        tokens_upper_string(select_tokens)
+    };
     if compact.chars().count() <= MAX_LINE_WIDTH {
         return compact;
     }
@@ -2157,7 +2171,7 @@ fn format_single_select(select_tokens: &[Token]) -> String {
                 .windows(2)
                 .any(|w| w[0].is(Kind::OpenParen) && w[1].is_word("SELECT"));
             let expr_str = if has_subquery {
-                format_expr_with_subqueries(expr)
+                format_expr_with_subqueries(expr, unwrap_joins)
             } else {
                 tokens_upper_string(expr)
             };
@@ -2183,7 +2197,7 @@ fn format_single_select(select_tokens: &[Token]) -> String {
 
     // FROM and rest - format with proper line breaks for JOIN/ON
     let rest_tokens = &select_tokens[from_pos..];
-    let rest_formatted = format_from_clause_tokens(rest_tokens);
+    let rest_formatted = format_from_clause_tokens(rest_tokens, unwrap_joins);
     result.push_str(&rest_formatted);
 
     result
@@ -2191,7 +2205,7 @@ fn format_single_select(select_tokens: &[Token]) -> String {
 
 /// Formats a SELECT body, handling UNION/INTERSECT/EXCEPT by splitting into
 /// independent SELECT parts and joining them with the set operator on its own line.
-fn format_select_body(select_tokens: &[Token]) -> String {
+fn format_select_body(select_tokens: &[Token], unwrap_joins: bool) -> String {
     // Check for UNION/INTERSECT/EXCEPT at the top level.
     if let Some(op_pos) = find_set_operator(select_tokens) {
         let first_part = &select_tokens[..op_pos];
@@ -2206,7 +2220,7 @@ fn format_select_body(select_tokens: &[Token]) -> String {
             (op_token.emit(), rest)
         };
 
-        let mut result = format_single_select(first_part);
+        let mut result = format_single_select(first_part, unwrap_joins);
         // Ensure the first SELECT ends with a newline before the set operator.
         if !result.ends_with('\n') {
             result.push('\n');
@@ -2215,19 +2229,19 @@ fn format_select_body(select_tokens: &[Token]) -> String {
         result.push('\n');
 
         // Recursively format the rest (which may contain more UNION/INTERSECT/EXCEPT).
-        result.push_str(&format_select_body(after_op));
+        result.push_str(&format_select_body(after_op, unwrap_joins));
         return result;
     }
 
-    format_single_select(select_tokens)
+    format_single_select(select_tokens, unwrap_joins)
 }
 
-fn format_create_view(tokens: &[Token], select_pos: usize) -> String {
+fn format_create_view(tokens: &[Token], select_pos: usize, unwrap_joins: bool) -> String {
     let prelude = &tokens[..select_pos];
     let select_tokens = &tokens[select_pos..];
 
     let prelude_str = tokens_upper_string(prelude);
-    let body = format_select_body(select_tokens);
+    let body = format_select_body(select_tokens, unwrap_joins);
 
     let mut result = format!("{}\n{}", prelude_str, body);
 
@@ -2333,7 +2347,134 @@ fn update_paren_depth(tok: &Token, depth: &mut usize) {
     }
 }
 
-fn format_from_clause_tokens(tokens: &[Token]) -> String {
+/// True when a FROM table reference is a mysqldump-style parenthesized join chain:
+/// it opens with `(` and contains a join keyword. Such chains are the target of
+/// [`unwrap_export_joins`]; plain tables, subqueries and derived tables are not.
+fn is_export_join_chain(tokens: &[Token]) -> bool {
+    tokens.first().is_some_and(|t| t.is(Kind::OpenParen)) && tokens.iter().any(|t| is_join_start(t))
+}
+
+/// Whether `tokens` contain a mysqldump-style parenthesized join chain anywhere — a `(`
+/// whose matching `)` closes a run containing a join, either at the end of the slice or
+/// right where the chain continues (another join, a query tail, or the terminator). Used
+/// by the compact single-line SELECT path, where the FROM clause is never laid out and
+/// the unwrap has to run over the whole statement.
+fn has_export_join_chain(tokens: &[Token]) -> bool {
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].is(Kind::OpenParen) {
+            if let Some(close) = find_matching_paren(tokens, i) {
+                let inner = &tokens[i + 1..close];
+                let inner_is_subquery = inner
+                    .iter()
+                    .find(|t| !t.is(Kind::Comment))
+                    .is_some_and(|t| t.is_word("SELECT") || t.is_word("WITH"));
+                if !inner_is_subquery && inner.iter().any(|t| is_join_start(t)) {
+                    let after = close + 1;
+                    if after == tokens.len()
+                        || is_join_start(&tokens[after])
+                        || is_query_tail_start(&tokens[after])
+                        || tokens[after].is(Kind::Semicolon)
+                    {
+                        return true;
+                    }
+                }
+                i = close + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Rewrites a mysqldump-style parenthesized join chain into the hand-written form, dropping
+/// the redundant parentheses mysqldump wraps around a view's join chain and one level of the
+/// doubled `ON ((...))` parentheses:
+///
+/// ```text
+/// ((`zeile` `z` LEFT JOIN `lv` ON((`z`.`zeile_pos` = `lv`.`lv_pos`))) LEFT JOIN `blatt` `b`
+///  ON((`z`.`zeile_blattNr` = `b`.`blatt_id`)))
+/// ```
+/// becomes
+/// ```text
+/// `zeile` `z` LEFT JOIN `lv` ON(`z`.`zeile_pos` = `lv`.`lv_pos`) LEFT JOIN `blatt` `b`
+/// ON(`z`.`zeile_blattNr` = `b`.`blatt_id`)
+/// ```
+///
+/// Group parentheses are only dropped when they wrap a join chain (the `(` matches the final
+/// `)`, or the join chain continues right after the group), and `ON` conditions keep their
+/// single condition parenthesis — only the doubling is removed. Left joins associate to the
+/// left, so removing the wrappers does not change what the query computes.
+fn unwrap_export_joins<'a>(tokens: &'a [Token<'a>]) -> Vec<Token<'a>> {
+    let mut result = Vec::with_capacity(tokens.len());
+    let mut i = 0;
+    // The `)` closing each dropped group wrapper; their indices are skipped on the way.
+    // More than one wrapper can be dropped (the chain wrapper and the first group's), so
+    // this is a list rather than a single slot.
+    let mut skip_closes: Vec<usize> = Vec::new();
+
+    while i < tokens.len() {
+        if skip_closes.contains(&i) {
+            i += 1;
+            continue;
+        }
+
+        if tokens[i].is(Kind::OpenParen) {
+            if let Some(close) = find_matching_paren(tokens, i) {
+                // The wrapper is only redundant when it holds a real join chain: its
+                // content contains a join and is not a subquery (a `(SELECT ...)` or
+                // `(WITH ...)` body can contain joins without being a chain wrapper).
+                let inner = &tokens[i + 1..close];
+                let inner_has_join = inner.iter().any(|t| is_join_start(t));
+                let inner_is_subquery = inner
+                    .iter()
+                    .find(|t| !t.is(Kind::Comment))
+                    .is_some_and(|t| t.is_word("SELECT") || t.is_word("WITH"));
+
+                let after = close + 1;
+                let chain_continues = after < tokens.len()
+                    && (is_join_start(&tokens[after])
+                        || is_query_tail_start(&tokens[after])
+                        || tokens[after].is(Kind::Semicolon)
+                        // A wrapper dropped earlier leaves its `)` here (`((chain))`).
+                        || skip_closes.contains(&after));
+                if inner_has_join
+                    && !inner_is_subquery
+                    && (after == tokens.len() || chain_continues)
+                {
+                    // Drop the wrapper; remember to drop its matching `)` too.
+                    skip_closes.push(close);
+                    i += 1;
+                    continue;
+                }
+            }
+        }
+
+        if tokens[i].is_word("ON") && i + 2 < tokens.len() {
+            // Drop one level of mysqldump's doubled `ON ((...))` parentheses.
+            if tokens[i + 1].is(Kind::OpenParen) && tokens[i + 2].is(Kind::OpenParen) {
+                if let Some(inner_close) = find_matching_paren(tokens, i + 2) {
+                    let outer_close = inner_close + 1;
+                    if outer_close < tokens.len() && tokens[outer_close].is(Kind::CloseParen) {
+                        result.push(tokens[i]); // ON
+                        result.extend_from_slice(&tokens[i + 2..inner_close]);
+                        result.push(tokens[inner_close]); // keep the inner `)`
+                        i = outer_close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        result.push(tokens[i]);
+        i += 1;
+    }
+
+    result
+}
+
+fn format_from_clause_tokens(tokens: &[Token], unwrap_joins: bool) -> String {
     let mut result = String::new();
     let mut i = 0;
 
@@ -2356,7 +2497,25 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                     update_paren_depth(&tokens[i], &mut depth);
                     i += 1;
                 }
-                let table_str = tokens_upper_string(&tokens[start..i]);
+                let table_str = if unwrap_joins && is_export_join_chain(&tokens[start..i]) {
+                    // Unwrap the export's join parens, then lay the hand-written chain out
+                    // with the usual JOIN/ON line breaks so the result is stable on a
+                    // second pass. The leading table name is rendered with normal spacing
+                    // (the join layout below only starts at the first JOIN), and the chain
+                    // itself is laid out by recursing from that first JOIN.
+                    let unwrapped = unwrap_export_joins(&tokens[start..i]);
+                    match unwrapped.iter().position(|t| is_join_start(t)) {
+                        Some(first_join) => {
+                            let head = tokens_upper_string(&unwrapped[..first_join]);
+                            let rest =
+                                format_from_clause_tokens(&unwrapped[first_join..], unwrap_joins);
+                            format!("{}{}", head, rest)
+                        }
+                        None => tokens_upper_string(&unwrapped),
+                    }
+                } else {
+                    tokens_upper_string(&tokens[start..i])
+                };
                 result.push(' ');
                 result.push_str(&table_str);
             } else if is_join_start(&tokens[i]) {
@@ -2420,7 +2579,7 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                         update_paren_depth(&tokens[i], &mut depth);
                         i += 1;
                     }
-                    let on_part = format_expr_with_subqueries(&tokens[on_start..i]);
+                    let on_part = format_expr_with_subqueries(&tokens[on_start..i], unwrap_joins);
                     result.push_str(&on_part);
                 }
                 continue;
@@ -2438,7 +2597,10 @@ fn format_from_clause_tokens(tokens: &[Token]) -> String {
                     update_paren_depth(&tokens[i], &mut depth);
                     i += 1;
                 }
-                result.push_str(&format_expr_with_subqueries(&tokens[start..i]));
+                result.push_str(&format_expr_with_subqueries(
+                    &tokens[start..i],
+                    unwrap_joins,
+                ));
                 continue;
             } else {
                 result.push_str(&tokens[i].emit());
@@ -2526,10 +2688,10 @@ fn is_select(tokens: &[Token]) -> bool {
     false
 }
 
-fn format_select(tokens: &[Token]) -> Result<String, String> {
+fn format_select(tokens: &[Token], unwrap_joins: bool) -> Result<String, String> {
     let select_pos = find_top_level_word(tokens, "SELECT");
     let Some(select_pos) = select_pos else {
-        return format_generic(tokens);
+        return format_generic(tokens, unwrap_joins);
     };
 
     // Preserve any leading comments before SELECT.
@@ -2541,7 +2703,7 @@ fn format_select(tokens: &[Token]) -> Result<String, String> {
         result.push_str(&tokens_upper_string(prelude));
         result.push(' ');
     }
-    result.push_str(&format_select_body(select_tokens));
+    result.push_str(&format_select_body(select_tokens, unwrap_joins));
 
     // Ensure semicolon
     if tokens.last().is_some_and(|t| t.is(Kind::Semicolon)) && !result.ends_with(';') {
@@ -2551,7 +2713,7 @@ fn format_select(tokens: &[Token]) -> Result<String, String> {
     Ok(result)
 }
 
-fn format_update(tokens: &[Token]) -> String {
+fn format_update(tokens: &[Token], unwrap_joins: bool) -> String {
     let set_pos = find_top_level_word(tokens, "SET");
 
     let Some(set_pos) = set_pos else {
@@ -2582,7 +2744,7 @@ fn format_update(tokens: &[Token]) -> String {
     let assignments = parse_select_columns(assignments_tokens);
 
     for (i, assign) in assignments.iter().enumerate() {
-        let assign_str = format_expr_with_subqueries(assign);
+        let assign_str = format_expr_with_subqueries(assign, unwrap_joins);
         if i < assignments.len() - 1 {
             result.push_str(&format!("\n    {},", assign_str));
         } else {
@@ -2595,9 +2757,9 @@ fn format_update(tokens: &[Token]) -> String {
         result.push('\n');
         let remaining = &tokens[wp..];
         let remaining_str = if remaining.last().is_some_and(|t| t.is(Kind::Semicolon)) {
-            format_expr_with_subqueries(&remaining[..remaining.len() - 1])
+            format_expr_with_subqueries(&remaining[..remaining.len() - 1], unwrap_joins)
         } else {
-            format_expr_with_subqueries(remaining)
+            format_expr_with_subqueries(remaining, unwrap_joins)
         };
         result.push_str(&remaining_str);
     }
@@ -2610,7 +2772,7 @@ fn format_update(tokens: &[Token]) -> String {
     result
 }
 
-fn format_delete(tokens: &[Token]) -> String {
+fn format_delete(tokens: &[Token], unwrap_joins: bool) -> String {
     let where_pos = find_top_level_word(tokens, "WHERE");
 
     let mut result = String::new();
@@ -2624,13 +2786,13 @@ fn format_delete(tokens: &[Token]) -> String {
         result.push('\n');
         let remaining = &tokens[wp..];
         let remaining_str = if remaining.last().is_some_and(|t| t.is(Kind::Semicolon)) {
-            format_expr_with_subqueries(&remaining[..remaining.len() - 1])
+            format_expr_with_subqueries(&remaining[..remaining.len() - 1], unwrap_joins)
         } else {
-            format_expr_with_subqueries(remaining)
+            format_expr_with_subqueries(remaining, unwrap_joins)
         };
         result.push_str(&remaining_str);
     } else {
-        result.push_str(&format_expr_with_subqueries(tokens));
+        result.push_str(&format_expr_with_subqueries(tokens, unwrap_joins));
     }
 
     // Semicolon
@@ -2643,7 +2805,7 @@ fn format_delete(tokens: &[Token]) -> String {
 
 /// Renders a statement reesql has no specific layout for, indenting any `(SELECT ...)`
 /// subquery it contains.
-fn format_generic(tokens: &[Token]) -> Result<String, String> {
+fn format_generic(tokens: &[Token], unwrap_joins: bool) -> Result<String, String> {
     let mut result = String::new();
     let mut prev: Option<&Token> = None;
     let mut i = 0;
@@ -2673,7 +2835,8 @@ fn format_generic(tokens: &[Token]) -> Result<String, String> {
 
             // Format the subquery from its own tokens. Rendering it back to text and
             // re-tokenizing would put the contents through an extra round trip for no reason.
-            let formatted = format_token_stream(&tokens[i + 1..close]).map_err(|e| e.message)?;
+            let formatted =
+                format_token_stream(&tokens[i + 1..close], unwrap_joins).map_err(|e| e.message)?;
 
             result.push_str("(\n");
             for line in formatted.trim().lines() {
@@ -2708,31 +2871,31 @@ fn format_generic(tokens: &[Token]) -> Result<String, String> {
     Ok(result)
 }
 
-fn format_statement(tokens: &[Token]) -> Result<String, String> {
+fn format_statement(tokens: &[Token], unwrap_joins: bool) -> Result<String, String> {
     if tokens.is_empty() {
         return Ok(String::new());
     }
 
     if is_create_trigger(tokens) {
-        format_create_trigger(tokens)
+        format_create_trigger(tokens, unwrap_joins)
     } else if is_create_table(tokens) {
-        format_create_table(tokens)
+        format_create_table(tokens, unwrap_joins)
     } else if let Some(select_pos) = is_create_view(tokens) {
-        Ok(format_create_view(tokens, select_pos))
+        Ok(format_create_view(tokens, select_pos, unwrap_joins))
     } else if is_insert(tokens) {
-        format_insert(tokens)
+        format_insert(tokens, unwrap_joins)
     } else if is_create_index(tokens) {
         Ok(format_create_index(tokens))
     } else if is_drop(tokens) {
         Ok(format_drop(tokens))
     } else if is_update(tokens) {
-        Ok(format_update(tokens))
+        Ok(format_update(tokens, unwrap_joins))
     } else if is_delete(tokens) {
-        Ok(format_delete(tokens))
+        Ok(format_delete(tokens, unwrap_joins))
     } else if is_select(tokens) {
-        format_select(tokens)
+        format_select(tokens, unwrap_joins)
     } else {
-        format_generic(tokens)
+        format_generic(tokens, unwrap_joins)
     }
 }
 
@@ -2743,7 +2906,7 @@ struct FormatError {
     message: String,
 }
 
-fn format_sql(input: &str) -> Result<String, FormatError> {
+fn format_sql(input: &str, unwrap_joins: bool) -> Result<String, FormatError> {
     // Line-ending characters between tokens are discarded like other source whitespace,
     // while carriage returns inside literals, quoted identifiers, and comments remain data.
     let tokens = tokenize(input);
@@ -2758,12 +2921,12 @@ fn format_sql(input: &str) -> Result<String, FormatError> {
         });
     }
 
-    format_token_stream(&tokens)
+    format_token_stream(&tokens, unwrap_joins)
 }
 
 /// Formats an already-tokenized stream. Statement layout happens here so that nested
 /// contexts (a subquery, a trigger body) can reuse it without a text round trip.
-fn format_token_stream(tokens: &[Token]) -> Result<String, FormatError> {
+fn format_token_stream(tokens: &[Token], unwrap_joins: bool) -> Result<String, FormatError> {
     let statements = split_statements(tokens);
 
     let mut result = String::new();
@@ -2775,7 +2938,7 @@ fn format_token_stream(tokens: &[Token]) -> Result<String, FormatError> {
             continue;
         }
 
-        let formatted = format_statement(toks).map_err(|message| FormatError {
+        let formatted = format_statement(toks, unwrap_joins).map_err(|message| FormatError {
             line: stmt.line,
             message,
         })?;
@@ -2826,7 +2989,7 @@ fn main() {
     };
 
     let source = cli.file.as_deref().unwrap_or("<stdin>");
-    let output = format_sql(&input).unwrap_or_else(|e| {
+    let output = format_sql(&input, cli.unwrap_joins).unwrap_or_else(|e| {
         eprintln!("reesql: {}:{}: {}", source, e.line, e.message);
         eprintln!("reesql: refusing to format invalid SQL; input left unchanged");
         std::process::exit(1);
@@ -2966,7 +3129,7 @@ mod tests {
         }
 
         for input in inputs {
-            let output = format_sql(&input).expect("fixture should format");
+            let output = format_sql(&input, false).expect("fixture should format");
             let before = tokenize(&input);
             let after = tokenize(&output);
 
