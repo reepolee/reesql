@@ -190,6 +190,97 @@ fn test_create_view_movies() {
     run_golden_test("create_view_movies");
 }
 
+/// mysqldump exports views with `CREATE ALGORITHM=... SQL SECURITY ... VIEW`, which used
+/// to fall through to generic formatting and lose the view's column layout and JOIN
+/// indentation entirely.
+#[test]
+fn test_create_view_mysql_export() {
+    run_golden_test("create_view_mysql_export");
+}
+
+/// The `--unwrap-joins` flag rewrites mysqldump's redundant parentheses around a view's
+/// join chain into the hand-written form, in both the multi-line and compact layouts, and
+/// stays idempotent.
+#[test]
+fn test_unwrap_joins_flag() {
+    let cases = [
+        // Multi-line layout from the issue: the parenthesized join chain becomes the
+        // usual indented JOIN/ON lines, with one level of the doubled ON parens dropped.
+        (
+            "CREATE ALGORITHM=UNDEFINED SQL SECURITY INVOKER VIEW `v` AS SELECT `z`.`zeile_blattNr` AS `zeile_blattNr`, `lv`.`lv_name` AS `lv_name` FROM ((`zeile` `z` LEFT JOIN `lv` ON((`z`.`zeile_pos` = `lv`.`lv_pos`))) LEFT JOIN `blatt` `b` ON((`z`.`zeile_blattNr` = `b`.`blatt_id`))) ORDER BY `z`.`zeile_blattNr`;",
+            "\
+CREATE ALGORITHM = UNDEFINED SQL SECURITY INVOKER VIEW `v` AS
+SELECT
+    `z`.`zeile_blattNr` AS `zeile_blattNr`,
+    `lv`.`lv_name`      AS `lv_name`
+FROM `zeile` `z`
+    LEFT JOIN `lv`
+        ON(`z`.`zeile_pos` = `lv`.`lv_pos`)
+    LEFT JOIN `blatt` `b`
+        ON(`z`.`zeile_blattNr` = `b`.`blatt_id`)
+ORDER BY `z`.`zeile_blattNr`;",
+        ),
+        // Compact layout: the statement stays on one line, but the join parens still go.
+        (
+            "SELECT a.id FROM (a LEFT JOIN b ON((a.x = b.x)));",
+            "SELECT a.id FROM a LEFT JOIN b ON(a.x = b.x);",
+        ),
+        // A single join wrapped in one paren is flattened too.
+        (
+            "SELECT a.id FROM ((a INNER JOIN b ON((a.x = b.x))));",
+            "SELECT a.id FROM a INNER JOIN b ON(a.x = b.x);",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let (status, stdout, stderr) = run_reesql_args(input, &["--unwrap-joins"]);
+        assert!(status.success(), "reesql failed on {input:?}: {stderr}");
+        assert_eq!(stdout.trim_end(), expected, "for input {input:?}");
+
+        // Idempotent under the flag.
+        let (status, second, stderr) = run_reesql_args(&stdout, &["--unwrap-joins"]);
+        assert!(
+            status.success(),
+            "reesql failed on its own output: {stderr}"
+        );
+        assert_eq!(second, stdout, "flag output should be idempotent");
+    }
+}
+
+/// Without the flag, the same input keeps every parenthesis — the flag is strictly opt-in.
+#[test]
+fn test_unwrap_joins_flag_is_opt_in() {
+    let input = "SELECT a.id FROM (a LEFT JOIN b ON((a.x = b.x)));";
+    let (status, stdout, stderr) = run_reesql(input);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(
+        stdout.trim_end(),
+        "SELECT a.id FROM(a LEFT JOIN b ON((a.x = b.x)));"
+    );
+}
+
+/// `@` is a variable prefix after a keyword or operator (`SET @x`, `a = @x`) but a
+/// name separator in a mysqldump `DEFINER` (`DEFINER = `root`@`localhost``). It must be
+/// spaced in the first position and tight in the second.
+#[test]
+fn test_at_spacing_variable_vs_definer() {
+    let cases = [
+        ("SET @x := 5;", "SET @x := 5;"),
+        ("SELECT @x FROM t;", "SELECT @x FROM t;"),
+        ("SELECT a = @x FROM t;", "SELECT a = @x FROM t;"),
+        (
+            "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW v AS SELECT 1;",
+            "CREATE ALGORITHM = UNDEFINED DEFINER = `root`@`localhost` SQL SECURITY DEFINER VIEW v AS\nSELECT 1;",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let (status, stdout, stderr) = run_reesql(input);
+        assert!(status.success(), "reesql failed on {input:?}: {stderr}");
+        assert_eq!(stdout.trim_end(), expected, "for input {input:?}");
+    }
+}
+
 #[test]
 fn test_insert_short() {
     run_golden_test("insert_short");
@@ -583,7 +674,12 @@ fn test_all_golden_outputs_are_idempotent() {
 }
 
 fn run_reesql(input: &str) -> (std::process::ExitStatus, String, String) {
+    run_reesql_args(input, &[])
+}
+
+fn run_reesql_args(input: &str, args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_reesql"))
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

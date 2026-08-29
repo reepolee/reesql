@@ -77,6 +77,29 @@ cat query.sql | reesql
 echo "SELECT * FROM users WHERE active = 1;" | reesql
 ```
 
+### Clean up mysqldump export parentheses (`--unwrap-joins`)
+
+mysqldump wraps a view's join chain in redundant parentheses:
+
+```sql
+CREATE VIEW v AS SELECT a.id FROM ((a LEFT JOIN b ON((a.x = b.x))) LEFT JOIN c ON((b.y = c.y)));
+```
+
+By default reesql preserves them exactly. Pass `--unwrap-joins` to rewrite them as
+written by hand:
+
+```bash
+reesql --unwrap-joins schema.sql
+cat query.sql | reesql --unwrap-joins
+```
+
+```sql
+CREATE VIEW v AS SELECT a.id FROM a LEFT JOIN b ON(a.x = b.x) LEFT JOIN c ON(b.y = c.y);
+```
+
+The flag only touches parentheses that wrap a join chain and one level of the doubled
+`ON ((...))` parentheses; subqueries and other parentheses pass through untouched.
+
 ### Invalid SQL
 
 When reesql cannot format a statement without losing or garbling SQL, it refuses rather than

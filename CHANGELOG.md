@@ -12,6 +12,23 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Added
+
+- `--unwrap-joins` flag: rewrites mysqldump's redundant parentheses around a view's join
+  chain (`FROM ((a LEFT JOIN b ON((...))) LEFT JOIN c ON((...)))`) into the hand-written
+  form (`FROM a LEFT JOIN b ON(...) LEFT JOIN c ON(...)`). Opt-in, so the default
+  formatting still preserves every character.
+
+### Fixed
+
+- `CREATE VIEW` statements exported by mysqldump with `ALGORITHM = ...`, `DEFINER = ...`,
+  or `SQL SECURITY ...` clauses between `CREATE` and `VIEW` are now recognised as views
+  and get the full column layout, JOIN indentation, and clause breaks instead of generic
+  single-line formatting.
+- `@` is spaced as a variable prefix (`SET @x`, `a = @x`) but tight as a name separator
+  in `DEFINER = `root`@`localhost``, which used to render with a stray space before the
+  `@`.
+
 ## [26.8.3] - 2026-08-28
 
 ## [26.8.2] - 2026-08-26
