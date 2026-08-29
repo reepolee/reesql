@@ -1358,17 +1358,114 @@ fn is_create_table(tokens: &[Token]) -> bool {
     starts_with_words(tokens, &["CREATE", "TABLE"])
 }
 
+/// Returns the index of the `VIEW` keyword in a `CREATE ... VIEW` statement, scanning
+/// past the option clauses MySQL allows between `CREATE` and `VIEW`:
+///
+/// ```sql
+/// CREATE [OR REPLACE] [ALGORITHM = value] [DEFINER = value] [SQL SECURITY mode] VIEW ...
+/// ```
+///
+/// mysqldump emits these options on view exports, so without this scan a real
+/// `CREATE ALGORITHM=UNDEFINED ... VIEW` was never recognised as a view and fell back
+/// to generic formatting. Returns `None` when the statement is not a view definition,
+/// so other `CREATE` statements (tables, indexes, triggers) are not mistaken for one.
+fn find_create_view_keyword(tokens: &[Token]) -> Option<usize> {
+    // The leading `CREATE` (which may be preceded by comments) sits at the first code
+    // token; scan the option clauses that follow it.
+    let create_pos = tokens.iter().position(|t| !t.is(Kind::Comment))?;
+    let mut i = create_pos + 1;
+    loop {
+        while i < tokens.len() && tokens[i].is(Kind::Comment) {
+            i += 1;
+        }
+        let tok = tokens.get(i)?;
+        if !tok.is(Kind::Word) {
+            return None;
+        }
+        if tok.is_word("VIEW") {
+            return Some(i);
+        }
+        if tok.is_word("OR") {
+            // OR REPLACE
+            i += 1;
+            while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                i += 1;
+            }
+            if !tokens.get(i).is_some_and(|t| t.is_word("REPLACE")) {
+                return None;
+            }
+            i += 1;
+        } else if tok.is_word("ALGORITHM") || tok.is_word("DEFINER") {
+            // ALGORITHM = UNDEFINED, DEFINER = `user`@`host`
+            i += 1;
+            while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                i += 1;
+            }
+            if !tokens.get(i).is_some_and(|t| t.is(Kind::Equals)) {
+                return None;
+            }
+            i += 1;
+            while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                i += 1;
+            }
+            if !tokens.get(i).is_some_and(|t| t.is(Kind::Word)) {
+                return None;
+            }
+            i += 1;
+            // A DEFINER value may carry a `@` host part (`user`@`host`).
+            while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                i += 1;
+            }
+            if tokens
+                .get(i)
+                .is_some_and(|t| t.is(Kind::Symbol) && t.text == "@")
+            {
+                i += 1;
+                while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                    i += 1;
+                }
+                if !tokens.get(i).is_some_and(|t| t.is(Kind::Word)) {
+                    return None;
+                }
+                i += 1;
+            }
+        } else if tok.is_word("SQL") {
+            // SQL SECURITY DEFINER | SQL SECURITY INVOKER
+            i += 1;
+            while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                i += 1;
+            }
+            if !tokens.get(i).is_some_and(|t| t.is_word("SECURITY")) {
+                return None;
+            }
+            i += 1;
+            while i < tokens.len() && tokens[i].is(Kind::Comment) {
+                i += 1;
+            }
+            if !tokens
+                .get(i)
+                .is_some_and(|t| t.is_word("DEFINER") || t.is_word("INVOKER"))
+            {
+                return None;
+            }
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+}
+
 /// Returns the index of the view's `SELECT`, which is where its body starts.
 fn is_create_view(tokens: &[Token]) -> Option<usize> {
     if !starts_with_words(tokens, &["CREATE"]) {
         return None;
     }
-    let second = nth_code_token(tokens, 1)?;
-    if !second.is_word("VIEW") && !second.is_word("OR") {
+    let view_pos = find_create_view_keyword(tokens)?;
+    let select_pos = find_top_level_word(tokens, "SELECT")?;
+    if select_pos <= view_pos {
         return None;
     }
-
-    find_top_level_word(tokens, "SELECT")
+    Some(select_pos)
 }
 
 fn is_insert(tokens: &[Token]) -> bool {

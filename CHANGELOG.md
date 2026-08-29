@@ -12,6 +12,13 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Fixed
+
+- `CREATE VIEW` statements exported by mysqldump with `ALGORITHM = ...`, `DEFINER = ...`,
+  or `SQL SECURITY ...` clauses between `CREATE` and `VIEW` are now recognised as views
+  and get the full column layout, JOIN indentation, and clause breaks instead of generic
+  single-line formatting.
+
 ## [26.8.3] - 2026-08-28
 
 ## [26.8.2] - 2026-08-26

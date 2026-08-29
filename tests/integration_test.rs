@@ -190,6 +190,14 @@ fn test_create_view_movies() {
     run_golden_test("create_view_movies");
 }
 
+/// mysqldump exports views with `CREATE ALGORITHM=... SQL SECURITY ... VIEW`, which used
+/// to fall through to generic formatting and lose the view's column layout and JOIN
+/// indentation entirely.
+#[test]
+fn test_create_view_mysql_export() {
+    run_golden_test("create_view_mysql_export");
+}
+
 #[test]
 fn test_insert_short() {
     run_golden_test("insert_short");
