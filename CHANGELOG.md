@@ -25,6 +25,9 @@ in an empty heading after the fact.
   or `SQL SECURITY ...` clauses between `CREATE` and `VIEW` are now recognised as views
   and get the full column layout, JOIN indentation, and clause breaks instead of generic
   single-line formatting.
+- `@` is spaced as a variable prefix (`SET @x`, `a = @x`) but tight as a name separator
+  in `DEFINER = `root`@`localhost``, which used to render with a stray space before the
+  `@`.
 
 ## [26.8.3] - 2026-08-28
 

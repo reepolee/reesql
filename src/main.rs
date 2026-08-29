@@ -1168,6 +1168,11 @@ fn needs_space(prev: &Token, tok: &Token) -> bool {
         ) => true,
         // A closing bracket separates from what follows, like a closing paren does.
         (Symbol, Word) if prev.text == "]" => true,
+        // `@` is a variable prefix after a keyword or operator (`SET @x`, `a = @x`), but
+        // a separator between two names in `DEFINER = `root`@`localhost``. Space it only
+        // in the variable position: a keyword before it, or an assignment operator.
+        (Word, Symbol) if tok.text == "@" => is_keyword(prev.text),
+        (Equals, Symbol) if tok.text == "@" => true,
         // Detach a symbol from a preceding word (`SET @x`), but never split a bracketed
         // subscript like `a[1]`. Nothing is glued to what follows, so prefixes such as
         // `@x` and `:=` stay intact.

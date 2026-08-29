@@ -259,6 +259,28 @@ fn test_unwrap_joins_flag_is_opt_in() {
     );
 }
 
+/// `@` is a variable prefix after a keyword or operator (`SET @x`, `a = @x`) but a
+/// name separator in a mysqldump `DEFINER` (`DEFINER = `root`@`localhost``). It must be
+/// spaced in the first position and tight in the second.
+#[test]
+fn test_at_spacing_variable_vs_definer() {
+    let cases = [
+        ("SET @x := 5;", "SET @x := 5;"),
+        ("SELECT @x FROM t;", "SELECT @x FROM t;"),
+        ("SELECT a = @x FROM t;", "SELECT a = @x FROM t;"),
+        (
+            "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`localhost` SQL SECURITY DEFINER VIEW v AS SELECT 1;",
+            "CREATE ALGORITHM = UNDEFINED DEFINER = `root`@`localhost` SQL SECURITY DEFINER VIEW v AS\nSELECT 1;",
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let (status, stdout, stderr) = run_reesql(input);
+        assert!(status.success(), "reesql failed on {input:?}: {stderr}");
+        assert_eq!(stdout.trim_end(), expected, "for input {input:?}");
+    }
+}
+
 #[test]
 fn test_insert_short() {
     run_golden_test("insert_short");
