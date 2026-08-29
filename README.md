@@ -100,6 +100,17 @@ CREATE VIEW v AS SELECT a.id FROM a LEFT JOIN b ON(a.x = b.x) LEFT JOIN c ON(b.y
 The flag only touches parentheses that wrap a join chain and one level of the doubled
 `ON ((...))` parentheses; subqueries and other parentheses pass through untouched.
 
+### Remove MySQL identifier backticks (`--remove-backticks`)
+
+Use this opt-in flag to remove backticks around MySQL identifiers, such as table and column
+names. The default preserves them because they can be required for reserved words or names
+containing spaces. Backticks in string literals and comments are left unchanged.
+
+```bash
+reesql --remove-backticks schema.sql
+cat query.sql | reesql --remove-backticks
+```
+
 ### Invalid SQL
 
 When reesql cannot format a statement without losing or garbling SQL, it refuses rather than

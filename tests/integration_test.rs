@@ -259,6 +259,38 @@ fn test_unwrap_joins_flag_is_opt_in() {
     );
 }
 
+/// `--remove-backticks` deliberately changes identifier text, while the default keeps all
+/// delimiters. Backticks inside literals and comments are data, not identifier delimiters.
+#[test]
+fn test_remove_backticks_flag() {
+    let input = "CREATE TABLE `items` (`id` INT NOT NULL, `long_name` VARCHAR(20) NOT NULL);\n\
+                 SELECT `id`, '`literal`', \"`double_quoted`\" FROM `items`; -- `comment`\n";
+    let expected = "\
+CREATE TABLE items (
+    id        INT         NOT NULL,
+    long_name VARCHAR(20) NOT NULL
+);
+
+SELECT id, '`literal`', \"`double_quoted`\" FROM items;
+
+-- `comment`";
+
+    let (status, unchanged, stderr) = run_reesql(input);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert!(unchanged.contains("`items`"));
+
+    let (status, stdout, stderr) = run_reesql_args(input, &["--remove-backticks"]);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql_args(&stdout, &["--remove-backticks"]);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "flag output should be idempotent");
+}
+
 /// `@` is a variable prefix after a keyword or operator (`SET @x`, `a = @x`) but a
 /// name separator in a mysqldump `DEFINER` (`DEFINER = `root`@`localhost``). It must be
 /// spaced in the first position and tight in the second.
