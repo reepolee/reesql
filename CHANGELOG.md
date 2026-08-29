@@ -12,6 +12,8 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+## [26.8.4] - 2026-08-29
+
 ### Added
 
 - `--unwrap-joins` flag: rewrites mysqldump's redundant parentheses around a view's join
