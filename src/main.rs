@@ -34,6 +34,11 @@ struct Cli {
     /// LEFT JOIN c ON(...)`). Opt-in: without it, every character is preserved exactly.
     #[arg(long = "unwrap-joins", action = clap::ArgAction::SetTrue)]
     unwrap_joins: bool,
+
+    /// Remove MySQL backtick delimiters from quoted identifiers. This is opt-in because
+    /// backticks can be required when an identifier is a reserved word or contains spaces.
+    #[arg(long = "remove-backticks", action = clap::ArgAction::SetTrue)]
+    remove_backticks: bool,
     file: Option<String>,
 }
 
@@ -2966,6 +2971,118 @@ fn format_token_stream(tokens: &[Token], unwrap_joins: bool) -> Result<String, F
     Ok(result)
 }
 
+/// Removes the delimiter pair from MySQL backtick-quoted identifiers. String literals and
+/// comments can contain backticks as data, so they pass through untouched. A malformed,
+/// unterminated quoted identifier is likewise left alone rather than partly rewriting it.
+fn remove_backtick_delimiters(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut index = 0;
+
+    while index < input.len() {
+        let remaining = &input[index..];
+
+        if remaining.starts_with("--") || remaining.starts_with('#') {
+            let line_end = remaining.find(['\n', '\r']).unwrap_or(remaining.len());
+            result.push_str(&remaining[..line_end]);
+            index += line_end;
+            continue;
+        }
+
+        if remaining.starts_with("/*") {
+            let comment_end = remaining
+                .find("*/")
+                .map(|position| position + 2)
+                .unwrap_or(remaining.len());
+            result.push_str(&remaining[..comment_end]);
+            index += comment_end;
+            continue;
+        }
+
+        if remaining.starts_with('\'') {
+            let literal_start = index;
+            index += 1;
+            while index < input.len() {
+                let literal_remaining = &input[index..];
+                if literal_remaining.starts_with("''") {
+                    index += 2;
+                } else if literal_remaining.starts_with('\'') {
+                    index += 1;
+                    break;
+                } else {
+                    let character = literal_remaining
+                        .chars()
+                        .next()
+                        .expect("remaining input is non-empty");
+                    index += character.len_utf8();
+                }
+            }
+            result.push_str(&input[literal_start..index]);
+            continue;
+        }
+
+        if remaining.starts_with('"') {
+            let identifier_start = index;
+            index += 1;
+            while index < input.len() {
+                let identifier_remaining = &input[index..];
+                if identifier_remaining.starts_with("\"\"") {
+                    index += 2;
+                } else if identifier_remaining.starts_with('"') {
+                    index += 1;
+                    break;
+                } else {
+                    let character = identifier_remaining
+                        .chars()
+                        .next()
+                        .expect("remaining input is non-empty");
+                    index += character.len_utf8();
+                }
+            }
+            result.push_str(&input[identifier_start..index]);
+            continue;
+        }
+
+        if remaining.starts_with('`') {
+            let identifier_start = index;
+            index += 1;
+            let contents_start = index;
+            let mut is_closed = false;
+
+            while index < input.len() {
+                let identifier_remaining = &input[index..];
+                if identifier_remaining.starts_with("``") {
+                    index += 2;
+                } else if identifier_remaining.starts_with('`') {
+                    result.push_str(&input[contents_start..index]);
+                    index += 1;
+                    is_closed = true;
+                    break;
+                } else {
+                    let character = identifier_remaining
+                        .chars()
+                        .next()
+                        .expect("remaining input is non-empty");
+                    index += character.len_utf8();
+                }
+            }
+
+            if !is_closed {
+                result.push_str(&input[identifier_start..index]);
+            }
+            continue;
+        }
+
+        let character = remaining
+            .chars()
+            .next()
+            .expect("remaining input is non-empty");
+        result.push(character);
+        index += character.len_utf8();
+    }
+
+    result
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -2994,11 +3111,21 @@ fn main() {
     };
 
     let source = cli.file.as_deref().unwrap_or("<stdin>");
-    let output = format_sql(&input, cli.unwrap_joins).unwrap_or_else(|e| {
+    let formatted = format_sql(&input, cli.unwrap_joins).unwrap_or_else(|e| {
         eprintln!("reesql: {}:{}: {}", source, e.line, e.message);
         eprintln!("reesql: refusing to format invalid SQL; input left unchanged");
         std::process::exit(1);
     });
+    let output = if cli.remove_backticks {
+        let unquoted = remove_backtick_delimiters(&formatted);
+        format_sql(&unquoted, cli.unwrap_joins).unwrap_or_else(|e| {
+            eprintln!("reesql: {}:{}: {}", source, e.line, e.message);
+            eprintln!("reesql: refusing to format invalid SQL; input left unchanged");
+            std::process::exit(1);
+        })
+    } else {
+        formatted
+    };
 
     if let Some(path) = &cli.file {
         fs::write(path, &output).unwrap_or_else(|e| {

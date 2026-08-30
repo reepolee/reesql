@@ -12,6 +12,12 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Added
+
+- `--remove-backticks` flag: removes MySQL backtick delimiters from quoted identifiers.
+  The default formatter output remains unchanged; backticks in literals and comments stay
+  intact when the flag is enabled.
+
 ## [26.8.4] - 2026-08-29
 
 ### Added
