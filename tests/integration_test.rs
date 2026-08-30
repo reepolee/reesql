@@ -291,6 +291,55 @@ SELECT id, '`literal`', \"`double_quoted`\" FROM items;
     assert_eq!(second_stdout, stdout, "flag output should be idempotent");
 }
 
+/// `--clean` removes mysqldump's explicit character-set, collation, and table-option values
+/// from a CREATE TABLE statement, while the default output preserves every one of them.
+#[test]
+fn test_clean_flag() {
+    let input = "-- Dumping structure for table weatherlink.readings\n\
+CREATE TABLE IF NOT EXISTS `readings` (\n\
+`id` bigint(20) NOT NULL AUTO_INCREMENT,\n\
+`value_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`value_json`)),\n\
+`created_at` timestamp NOT NULL DEFAULT current_timestamp(),\n\
+PRIMARY KEY (`id`)\n\
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;";
+    let expected = "-- Dumping structure for table weatherlink.readings\nCREATE TABLE IF NOT EXISTS `readings` (\n    `id`         BIGINT(20) NOT NULL AUTO_INCREMENT,\n    `value_json` LONGTEXT   NOT NULL CHECK(json_valid(`value_json`)),\n    `created_at` TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP(),\n    PRIMARY KEY(`id`)\n);";
+
+    let (status, unchanged, stderr) = run_reesql(input);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert!(unchanged.contains("CHARACTER SET utf8mb4"));
+    assert!(unchanged.contains("ENGINE = InnoDB"));
+
+    let (status, stdout, stderr) = run_reesql_args(input, &["--clean"]);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql_args(&stdout, &["--clean"]);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "flag output should be idempotent");
+}
+
+/// mysqldump's conditional-comment preamble is setup metadata, not a set of independent SQL
+/// blocks. Consecutive statements therefore use adjacent lines, while the following statement
+/// still starts after the usual blank line.
+#[test]
+fn test_mysql_dump_version_comment_preamble_spacing() {
+    let input = "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n\
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;\n\
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;\n\
+/*!40101 SET NAMES utf8 */;\n\
+/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;\n\
+/*!40103 SET TIME_ZONE='+00:00' */;\n\
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;\n\
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;\n\
+CREATE TABLE items (id INT NOT NULL);";
+    let expected = "/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;\n/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;\n/*!40101 SET NAMES utf8 */;\n/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;\n/*!40103 SET TIME_ZONE='+00:00' */;\n/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;\n/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;\n\nCREATE TABLE items (\n    id INT NOT NULL\n);";
+
+    assert_format_is_idempotent(input, expected);
+}
+
 /// `@` is a variable prefix after a keyword or operator (`SET @x`, `a = @x`) but a
 /// name separator in a mysqldump `DEFINER` (`DEFINER = `root`@`localhost``). It must be
 /// spaced in the first position and tight in the second.

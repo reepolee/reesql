@@ -111,6 +111,19 @@ reesql --remove-backticks schema.sql
 cat query.sql | reesql --remove-backticks
 ```
 
+### Clean mysqldump table defaults (`--clean`)
+
+Use this opt-in flag to remove mysqldump's explicit column `CHARACTER SET` / `COLLATE`
+pairs and trailing `ENGINE`, `DEFAULT CHARSET`, and `COLLATE` table options. It leaves the
+table definition as it would normally be written by hand:
+
+```bash
+reesql --clean schema.sql
+cat schema.sql | reesql --clean
+```
+
+The default preserves these clauses because they can be intentional schema choices.
+
 ### Invalid SQL
 
 When reesql cannot format a statement without losing or garbling SQL, it refuses rather than

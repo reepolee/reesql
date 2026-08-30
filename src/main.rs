@@ -39,6 +39,11 @@ struct Cli {
     /// backticks can be required when an identifier is a reserved word or contains spaces.
     #[arg(long = "remove-backticks", action = clap::ArgAction::SetTrue)]
     remove_backticks: bool,
+
+    /// Remove mysqldump character-set, collation, and table-option values from CREATE TABLE
+    /// statements. This is opt-in because those clauses can be intentional schema choices.
+    #[arg(long = "clean", action = clap::ArgAction::SetTrue)]
+    clean: bool,
     file: Option<String>,
 }
 
@@ -2909,6 +2914,23 @@ fn format_statement(tokens: &[Token], unwrap_joins: bool) -> Result<String, Stri
     }
 }
 
+/// A standalone mysqldump version-comment statement, such as `/*!40101 SET NAMES utf8 */;`.
+/// These setup statements form a preamble, so they are kept on adjacent lines instead of being
+/// separated by the blank line used for independent SQL statements.
+fn is_mysql_version_comment_statement(tokens: &[Token]) -> bool {
+    let mut has_version_comment = false;
+
+    for token in tokens {
+        if token.is(Kind::Comment) && token.text.starts_with("/*!") {
+            has_version_comment = true;
+        } else if !token.is(Kind::Semicolon) {
+            return false;
+        }
+    }
+
+    has_version_comment
+}
+
 /// Refusal to format, pointing at the line the offending statement starts on.
 #[derive(Debug)]
 struct FormatError {
@@ -2941,6 +2963,7 @@ fn format_token_stream(tokens: &[Token], unwrap_joins: bool) -> Result<String, F
 
     let mut result = String::new();
     let mut has_previous_statement = false;
+    let mut previous_is_mysql_version_comment = false;
 
     for stmt in &statements {
         let toks = stmt.tokens;
@@ -2959,13 +2982,17 @@ fn format_token_stream(tokens: &[Token], unwrap_joins: bool) -> Result<String, F
         // Separate every statement from the next one with a blank line. This is based on
         // the actual statement boundary rather than its leading keywords, so consecutive
         // statements of the same type remain readable too.
-        if has_previous_statement {
+        let is_mysql_version_comment = is_mysql_version_comment_statement(toks);
+        if has_previous_statement
+            && !(previous_is_mysql_version_comment && is_mysql_version_comment)
+        {
             result.push('\n');
         }
 
         result.push_str(&formatted);
         result.push('\n');
         has_previous_statement = true;
+        previous_is_mysql_version_comment = is_mysql_version_comment;
     }
 
     Ok(result)
@@ -3083,6 +3110,105 @@ fn remove_backtick_delimiters(input: &str) -> String {
     result
 }
 
+/// Removes mysqldump's column character-set/collation pairs and a CREATE TABLE statement's
+/// trailing ENGINE, DEFAULT CHARSET, and COLLATE options. The caller formats the result again,
+/// so deleting only the token ranges is enough: normal spacing and column alignment are restored
+/// by the usual formatter.
+fn remove_mysqldump_values(input: &str) -> String {
+    let tokens = tokenize(input);
+    let statements = split_statements(&tokens);
+    let mut removals = Vec::new();
+
+    for statement in statements {
+        let statement_tokens = statement.tokens;
+        if !is_create_table(statement_tokens) {
+            continue;
+        }
+
+        let Some(open_paren) = statement_tokens
+            .iter()
+            .position(|token| token.is(Kind::OpenParen))
+        else {
+            continue;
+        };
+        let Some(close_paren) = find_matching_paren(statement_tokens, open_paren) else {
+            continue;
+        };
+
+        for index in open_paren + 1..close_paren.saturating_sub(4) {
+            let matches_character_set_collation = statement_tokens[index].is_word("CHARACTER")
+                && statement_tokens[index + 1].is_word("SET")
+                && statement_tokens[index + 2].is(Kind::Word)
+                && statement_tokens[index + 3].is_word("COLLATE")
+                && statement_tokens[index + 4].is(Kind::Word);
+            if matches_character_set_collation {
+                let start = offset_in(input, statement_tokens[index].text);
+                let last_token = &statement_tokens[index + 4];
+                let end = offset_in(input, last_token.text) + last_token.text.len();
+                removals.push((start, end));
+            }
+        }
+
+        let mut options_end = statement_tokens.len();
+        if statement_tokens
+            .last()
+            .is_some_and(|token| token.is(Kind::Semicolon))
+        {
+            options_end -= 1;
+        }
+
+        let mut index = close_paren + 1;
+        let mut removed_option = false;
+        while index < options_end {
+            if statement_tokens[index].is_word("ENGINE") {
+                index += 1;
+                if index < options_end && statement_tokens[index].is(Kind::Equals) {
+                    index += 1;
+                }
+            } else if statement_tokens[index].is_word("DEFAULT")
+                && index + 1 < options_end
+                && statement_tokens[index + 1].is_word("CHARSET")
+            {
+                index += 2;
+                if index < options_end && statement_tokens[index].is(Kind::Equals) {
+                    index += 1;
+                }
+            } else if statement_tokens[index].is_word("COLLATE") {
+                index += 1;
+                if index < options_end && statement_tokens[index].is(Kind::Equals) {
+                    index += 1;
+                }
+            } else {
+                break;
+            }
+
+            if index >= options_end || !statement_tokens[index].is(Kind::Word) {
+                break;
+            }
+            index += 1;
+            removed_option = true;
+        }
+
+        if removed_option && index == options_end {
+            let close_token = &statement_tokens[close_paren];
+            let start = offset_in(input, close_token.text) + close_token.text.len();
+            let end = if options_end < statement_tokens.len() {
+                offset_in(input, statement_tokens[options_end].text)
+            } else {
+                offset_in(input, statement_tokens[options_end - 1].text)
+                    + statement_tokens[options_end - 1].text.len()
+            };
+            removals.push((start, end));
+        }
+    }
+
+    let mut result = input.to_string();
+    for (start, end) in removals.into_iter().rev() {
+        result.replace_range(start..end, "");
+    }
+    result
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -3116,7 +3242,7 @@ fn main() {
         eprintln!("reesql: refusing to format invalid SQL; input left unchanged");
         std::process::exit(1);
     });
-    let output = if cli.remove_backticks {
+    let mut output = if cli.remove_backticks {
         let unquoted = remove_backtick_delimiters(&formatted);
         format_sql(&unquoted, cli.unwrap_joins).unwrap_or_else(|e| {
             eprintln!("reesql: {}:{}: {}", source, e.line, e.message);
@@ -3126,6 +3252,15 @@ fn main() {
     } else {
         formatted
     };
+
+    if cli.clean {
+        let cleaned = remove_mysqldump_values(&output);
+        output = format_sql(&cleaned, cli.unwrap_joins).unwrap_or_else(|e| {
+            eprintln!("reesql: {}:{}: {}", source, e.line, e.message);
+            eprintln!("reesql: refusing to format invalid SQL; input left unchanged");
+            std::process::exit(1);
+        });
+    }
 
     if let Some(path) = &cli.file {
         fs::write(path, &output).unwrap_or_else(|e| {

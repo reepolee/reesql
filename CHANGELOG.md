@@ -12,6 +12,12 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+### Added
+
+- `--clean` flag: removes mysqldump's explicit `CHARACTER SET` / `COLLATE` column pairs and
+  trailing `ENGINE`, `DEFAULT CHARSET`, and `COLLATE` table options from `CREATE TABLE`
+  statements. The default output preserves them.
+
 ## [26.8.5] - 2026-08-30
 
 ### Added
