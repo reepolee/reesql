@@ -44,6 +44,12 @@ struct Cli {
     /// statements. This is opt-in because those clauses can be intentional schema choices.
     #[arg(long = "clean", action = clap::ArgAction::SetTrue)]
     clean: bool,
+
+    /// Read SQL from standard input and write the formatted selection to standard output.
+    /// This is intended for editor integrations such as VS Code partial formatting.
+    #[arg(long = "stdin", action = clap::ArgAction::SetTrue, conflicts_with = "file")]
+    stdin: bool,
+
     file: Option<String>,
 }
 
@@ -3222,18 +3228,23 @@ fn main() {
         return;
     }
 
-    let input = if let Some(path) = &cli.file {
-        fs::read_to_string(path).unwrap_or_else(|e| {
-            eprintln!("reesql: error reading '{}': {}", path, e);
-            std::process::exit(1);
-        })
-    } else {
+    let reads_stdin = cli.stdin || cli.file.is_none();
+    let input = if reads_stdin {
         let mut buf = String::new();
         io::stdin().read_to_string(&mut buf).unwrap_or_else(|e| {
             eprintln!("reesql: error reading stdin: {}", e);
             std::process::exit(1);
         });
         buf
+    } else {
+        let path = cli
+            .file
+            .as_ref()
+            .expect("file is required unless --stdin is set");
+        fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("reesql: error reading '{}': {}", path, e);
+            std::process::exit(1);
+        })
     };
 
     let source = cli.file.as_deref().unwrap_or("<stdin>");

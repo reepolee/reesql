@@ -71,6 +71,15 @@ reesql path/to/file.sql
 cat query.sql | reesql
 ```
 
+### Format a VS Code selection from stdin
+
+Use `--stdin` when an editor sends only the selected SQL. The formatted selection is
+written to standard output; no file is modified.
+
+```bash
+reesql --stdin
+```
+
 ### Pipe directly
 
 ```bash

@@ -758,6 +758,17 @@ fn run_reesql(input: &str) -> (std::process::ExitStatus, String, String) {
     run_reesql_args(input, &[])
 }
 
+#[test]
+fn test_stdin_flag_formats_a_partial_selection() {
+    let input = "name varchar(255),enabled tinyint";
+    let expected = "name VARCHAR(255), enabled TINYINT\n";
+
+    let (status, stdout, stderr) = run_reesql_args(input, &["--stdin"]);
+
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout, expected);
+}
+
 fn run_reesql_args(input: &str, args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_reesql"))
         .args(args)
