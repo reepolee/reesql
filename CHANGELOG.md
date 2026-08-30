@@ -12,6 +12,8 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+## [26.8.6] - 2026-08-30
+
 ### Added
 
 - `--clean` flag: removes mysqldump's explicit `CHARACTER SET` / `COLLATE` column pairs and
