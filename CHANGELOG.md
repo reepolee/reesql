@@ -12,6 +12,8 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+## [26.8.5] - 2026-08-30
+
 ### Added
 
 - `--remove-backticks` flag: removes MySQL backtick delimiters from quoted identifiers.
