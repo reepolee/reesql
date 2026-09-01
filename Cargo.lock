@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "reesql"
-version = "26.8.7"
+version = "26.9.0"
 dependencies = [
  "clap",
 ]

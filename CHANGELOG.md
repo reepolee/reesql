@@ -12,6 +12,8 @@ in an empty heading after the fact.
 
 ## [Unreleased]
 
+## [26.9.0] - 2026-09-01
+
 ## [26.8.7] - 2026-08-30
 
 ## [26.8.6] - 2026-08-30
