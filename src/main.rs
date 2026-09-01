@@ -3006,12 +3006,14 @@ fn format_token_stream(tokens: &[Token], unwrap_joins: bool) -> Result<String, F
     Ok(result)
 }
 
-/// Removes the delimiter pair from MySQL backtick-quoted identifiers. String literals and
-/// comments can contain backticks as data, so they pass through untouched. A malformed,
-/// unterminated quoted identifier is likewise left alone rather than partly rewriting it.
+/// Removes the delimiter pair from MySQL backtick-quoted table and column identifiers.
+/// String literals, comments, and `DEFINER` account values can contain backticks that are
+/// semantically significant, so they pass through untouched. A malformed, unterminated
+/// quoted identifier is likewise left alone rather than partly rewriting it.
 fn remove_backtick_delimiters(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
     let mut index = 0;
+    let mut definer_value_remaining: usize = 0;
 
     while index < input.len() {
         let remaining = &input[index..];
@@ -3082,13 +3084,16 @@ fn remove_backtick_delimiters(input: &str) -> String {
             index += 1;
             let contents_start = index;
             let mut is_closed = false;
+            let preserve_delimiters = definer_value_remaining > 0;
 
             while index < input.len() {
                 let identifier_remaining = &input[index..];
                 if identifier_remaining.starts_with("``") {
                     index += 2;
                 } else if identifier_remaining.starts_with('`') {
-                    result.push_str(&input[contents_start..index]);
+                    if !preserve_delimiters {
+                        result.push_str(&input[contents_start..index]);
+                    }
                     index += 1;
                     is_closed = true;
                     break;
@@ -3101,10 +3106,39 @@ fn remove_backtick_delimiters(input: &str) -> String {
                 }
             }
 
-            if !is_closed {
+            if !is_closed || preserve_delimiters {
                 result.push_str(&input[identifier_start..index]);
+                definer_value_remaining = definer_value_remaining.saturating_sub(1);
             }
             continue;
+        }
+
+        let previous_character = if index == 0 {
+            None
+        } else {
+            let before_remaining = &input[..index];
+            let previous_characters = before_remaining.chars();
+            previous_characters.last()
+        };
+        let has_identifier_prefix = previous_character
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        let after_definer = remaining.get("DEFINER".len()..);
+        let following_character = after_definer.and_then(|text| {
+            let mut following_characters = text.chars();
+            following_characters.next()
+        });
+        let has_identifier_suffix = following_character
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+        let possible_definer = remaining.get(.."DEFINER".len());
+        let starts_definer =
+            possible_definer.is_some_and(|text| text.eq_ignore_ascii_case("DEFINER"));
+
+        if starts_definer && !has_identifier_prefix && !has_identifier_suffix {
+            let definer_remainder = after_definer.expect("DEFINER prefix is present");
+            let after_whitespace = definer_remainder.trim_start();
+            if after_whitespace.starts_with('=') {
+                definer_value_remaining = 2;
+            }
         }
 
         let character = remaining
@@ -3118,10 +3152,10 @@ fn remove_backtick_delimiters(input: &str) -> String {
     result
 }
 
-/// Removes mysqldump's column character-set/collation pairs and a CREATE TABLE statement's
-/// trailing ENGINE, DEFAULT CHARSET, and COLLATE options. The caller formats the result again,
-/// so deleting only the token ranges is enough: normal spacing and column alignment are restored
-/// by the usual formatter.
+/// Removes mysqldump's column character-set/collation pairs, trailing CREATE TABLE options,
+/// including `AUTO_INCREMENT`, and CREATE VIEW `ALGORITHM`, `DEFINER`, and `SQL SECURITY`
+/// clauses. The caller formats the result again, so deleting only the token ranges is enough:
+/// normal spacing and column alignment are restored by the usual formatter.
 fn remove_mysqldump_values(input: &str) -> String {
     let tokens = tokenize(input);
     let statements = split_statements(&tokens);
@@ -3129,6 +3163,38 @@ fn remove_mysqldump_values(input: &str) -> String {
 
     for statement in statements {
         let statement_tokens = statement.tokens;
+        if let Some(view_pos) = find_create_view_keyword(statement_tokens) {
+            let mut statement_token_iter = statement_tokens.iter();
+            let possible_create_pos =
+                statement_token_iter.position(|token| !token.is(Kind::Comment));
+            let create_pos = possible_create_pos.expect("CREATE VIEW has a CREATE token");
+            let mut options_start = create_pos + 1;
+
+            while options_start < view_pos && statement_tokens[options_start].is(Kind::Comment) {
+                options_start += 1;
+            }
+            if options_start < view_pos && statement_tokens[options_start].is_word("OR") {
+                options_start += 1;
+                while options_start < view_pos && statement_tokens[options_start].is(Kind::Comment)
+                {
+                    options_start += 1;
+                }
+                if options_start < view_pos && statement_tokens[options_start].is_word("REPLACE") {
+                    options_start += 1;
+                }
+            }
+            while options_start < view_pos && statement_tokens[options_start].is(Kind::Comment) {
+                options_start += 1;
+            }
+
+            if options_start < view_pos {
+                let start = offset_in(input, statement_tokens[options_start].text);
+                let end = offset_in(input, statement_tokens[view_pos].text);
+                removals.push((start, end));
+            }
+            continue;
+        }
+
         if !is_create_table(statement_tokens) {
             continue;
         }
@@ -3182,6 +3248,11 @@ fn remove_mysqldump_values(input: &str) -> String {
                     index += 1;
                 }
             } else if statement_tokens[index].is_word("COLLATE") {
+                index += 1;
+                if index < options_end && statement_tokens[index].is(Kind::Equals) {
+                    index += 1;
+                }
+            } else if statement_tokens[index].is_word("AUTO_INCREMENT") {
                 index += 1;
                 if index < options_end && statement_tokens[index].is(Kind::Equals) {
                     index += 1;

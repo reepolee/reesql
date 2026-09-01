@@ -315,6 +315,25 @@ SELECT id, '`literal`', \"`double_quoted`\" FROM items;
     assert_eq!(second_stdout, stdout, "flag output should be idempotent");
 }
 
+#[test]
+fn test_remove_backticks_preserves_definer_account_value() {
+    let input = "CREATE ALGORITHM=UNDEFINED DEFINER=`ales`@`%` SQL SECURITY DEFINER VIEW `items_view` AS SELECT `id` FROM `items`;";
+    let expected = "\
+CREATE ALGORITHM = UNDEFINED DEFINER = `ales`@`%` SQL SECURITY DEFINER VIEW items_view AS
+SELECT id FROM items;";
+
+    let (status, stdout, stderr) = run_reesql_args(input, &["--remove-backticks"]);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql_args(&stdout, &["--remove-backticks"]);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "flag output should be idempotent");
+}
+
 /// `--clean` removes mysqldump's explicit character-set, collation, and table-option values
 /// from a CREATE TABLE statement, while the default output preserves every one of them.
 #[test]
@@ -325,13 +344,31 @@ CREATE TABLE IF NOT EXISTS `readings` (\n\
 `value_json` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`value_json`)),\n\
 `created_at` timestamp NOT NULL DEFAULT current_timestamp(),\n\
 PRIMARY KEY (`id`)\n\
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;";
+) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci;";
     let expected = "-- Dumping structure for table weatherlink.readings\nCREATE TABLE IF NOT EXISTS `readings` (\n    `id`         BIGINT(20) NOT NULL AUTO_INCREMENT,\n    `value_json` LONGTEXT   NOT NULL CHECK(json_valid(`value_json`)),\n    `created_at` TIMESTAMP  NOT NULL DEFAULT CURRENT_TIMESTAMP(),\n    PRIMARY KEY(`id`)\n);";
 
     let (status, unchanged, stderr) = run_reesql(input);
     assert!(status.success(), "reesql failed: {stderr}");
     assert!(unchanged.contains("CHARACTER SET utf8mb4"));
     assert!(unchanged.contains("ENGINE = InnoDB"));
+    assert!(unchanged.contains("AUTO_INCREMENT = 2"));
+
+    let (status, stdout, stderr) = run_reesql_args(input, &["--clean"]);
+    assert!(status.success(), "reesql failed: {stderr}");
+    assert_eq!(stdout.trim_end(), expected);
+
+    let (status, second_stdout, stderr) = run_reesql_args(&stdout, &["--clean"]);
+    assert!(
+        status.success(),
+        "reesql failed on its own output: {stderr}"
+    );
+    assert_eq!(second_stdout, stdout, "flag output should be idempotent");
+}
+
+#[test]
+fn test_clean_flag_removes_mysqldump_view_options() {
+    let input = "CREATE OR REPLACE ALGORITHM=UNDEFINED DEFINER=`ales`@`%` SQL SECURITY DEFINER VIEW `items_view` AS SELECT `id` FROM `items`;";
+    let expected = "CREATE OR REPLACE VIEW `items_view` AS\nSELECT `id` FROM `items`;";
 
     let (status, stdout, stderr) = run_reesql_args(input, &["--clean"]);
     assert!(status.success(), "reesql failed: {stderr}");
