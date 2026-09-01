@@ -34,6 +34,30 @@ fn test_create_view() {
 }
 
 #[test]
+fn test_create_view_preserves_non_reserved_column_case() {
+    let input = "CREATE VIEW v_reading_ranges AS SELECT t.id, t.metric_id, m.name AS metric_name, t.name, t.label, t.class_name, t.min_value, t.max_value, t.display, t.created_at, t.updated_at FROM reading_ranges t JOIN metrics m ON m.id = t.metric_id;";
+    let expected = "\
+CREATE VIEW v_reading_ranges AS
+SELECT
+    t.id,
+    t.metric_id,
+    m.name AS metric_name,
+    t.name,
+    t.label,
+    t.class_name,
+    t.min_value,
+    t.max_value,
+    t.display,
+    t.created_at,
+    t.updated_at
+FROM reading_ranges t
+    JOIN metrics m
+        ON m.id = t.metric_id;";
+
+    assert_format_is_idempotent(input, expected);
+}
+
+#[test]
 fn test_create_view_sqlite() {
     run_golden_test("create_view_sqlite");
 }

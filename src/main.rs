@@ -2206,7 +2206,9 @@ fn format_single_select(select_tokens: &[Token], unwrap_joins: bool) -> String {
                 format!("{} {}", expr_str, rest_str)
             }
         } else {
-            tokens_upper_string(col_tokens)
+            // A plain column reference ends in an identifier. Preserve its case even when the
+            // identifier happens to match a non-reserved keyword such as `label`.
+            tokens_upper_string_trailing_name(col_tokens)
         };
 
         if last {
